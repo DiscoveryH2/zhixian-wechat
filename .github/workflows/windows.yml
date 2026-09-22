@@ -1,0 +1,108 @@
+name: Windows checks and release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Prepare reproducible dependencies
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          ./.venv/Scripts/python.exe -m pip install --disable-pip-version-check -r requirements-lock.txt
+          ./.venv/Scripts/python.exe scripts/fetch_font.py
+      - name: Check source boundary and syntax
+        shell: pwsh
+        run: |
+          ./.venv/Scripts/python.exe scripts/check_secrets.py --tree . --history
+          if ($LASTEXITCODE -ne 0) { throw 'Source privacy scan failed.' }
+          ./.venv/Scripts/python.exe -m compileall -q src
+          node --check ui/app.js
+      - name: Test pull requests
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: ./.venv/Scripts/python.exe -m unittest discover -s tests -v
+      - name: Test and build the public Windows app
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: ./scripts/build.ps1 -OutputDirectory outputs/build
+      - name: Check the packaged app with synthetic inputs only
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: |
+          $reportPath = Join-Path $PWD 'work/portable-selftest.json'
+          $process = Start-Process -FilePath './outputs/build/Zhixian/Zhixian.exe' -ArgumentList '--self-test-report', $reportPath -PassThru -WindowStyle Hidden
+          if (-not $process.WaitForExit(60000)) { throw 'Portable diagnostics timed out.' }
+          $result = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+          if (-not $result.success) { throw 'Portable diagnostics failed.' }
+      - name: Assemble a credential-free distribution
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: |
+          $releaseVersion = ./.venv/Scripts/python.exe -c "import sys;sys.path.insert(0,'src');from desk.version import VERSION;print(VERSION)"
+          ./.venv/Scripts/python.exe scripts/package_portable.py --input outputs/build/Zhixian --output "outputs/Zhixian-$releaseVersion-Windows.zip"
+          if ($LASTEXITCODE -ne 0) { throw 'Release privacy check failed.' }
+      - name: Publish a new version after all checks pass
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const versionText = fs.readFileSync('src/desk/version.py', 'utf8');
+            const match = versionText.match(/VERSION\s*=\s*['"](\d+\.\d+\.\d+)['"]/);
+            if (!match) throw new Error('Invalid release version');
+            const version = match[1];
+            const tag = `v${version}`;
+            const { owner, repo } = context.repo;
+            let release;
+            try {
+              release = (await github.rest.repos.getReleaseByTag({ owner, repo, tag })).data;
+              if (!release.draft) {
+                core.info(`Version ${tag} is already published; existing assets stay unchanged.`);
+                return;
+              }
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              release = (await github.rest.repos.createRelease({
+                owner, repo, tag_name: tag, target_commitish: context.sha, draft: true,
+                name: `知弦 PC ${tag}`,
+                body: 'Windows 便携版：完整解压后运行 Zhixian.exe。\n\n包含离线中文 OCR 与界面字体；首次使用填写 API Key、Base URL、Model name。\n\n由干净的公开源码构建，经过源码防泄漏检查、测试和打包诊断。发行包不包含个人配置、聊天记录或 API 密钥。请保留目录中的许可文件。'
+              })).data;
+            }
+            const names = [`Zhixian-${version}-Windows.zip`, 'SHA256SUMS.txt'];
+            const existing = (await github.rest.repos.listReleaseAssets({ owner, repo, release_id: release.id })).data;
+            for (const name of names) {
+              if (existing.some(asset => asset.name === name)) continue;
+              const data = fs.readFileSync(path.join('outputs', name));
+              await github.rest.repos.uploadReleaseAsset({ owner, repo, release_id: release.id,
+                name, data, headers: { 'content-type': name.endsWith('.zip') ? 'application/zip' : 'text/plain', 'content-length': data.length },
+                request: { timeout: 600000 } });
+            }
+            await github.rest.repos.updateRelease({ owner, repo, release_id: release.id, draft: false });
+            core.info(release.html_url);

@@ -1,0 +1,62 @@
+import json
+import sys
+import threading
+import time
+import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+from desk.tasks import ModelTasks
+
+
+class ModelProcessTests(unittest.TestCase):
+    def setUp(self):
+        self.received = threading.Event()
+        received = self.received
+        self.delay = 0
+        parent = self
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers['Content-Length']))
+                received.set()
+                time.sleep(parent.delay)
+                data = json.dumps({'answers': {'connection': {'type': 'noul', 'noul': 1}}}).encode()
+                try:
+                    self.send_response(200)
+                    self.send_header('Content-Length', str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass
+            def log_message(self, *args):
+                pass
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.tasks = ModelTasks()
+        self.config = {'base_url': f'http://127.0.0.1:{self.server.server_port}/v1',
+                       'model_name': 'jev-synthetic', 'api_key': 'synthetic-test-only'}
+
+    def tearDown(self):
+        self.tasks.close()
+        self.server.shutdown()
+        self.server.server_close()
+
+    def test_spawned_model_task_uses_actual_local_protocol(self):
+        response = self.tasks.submit('test_connection', self.config).result(timeout=15)
+        self.assertTrue(response['success'])
+        self.assertFalse(response['generation_available'])
+
+    def test_close_terminates_running_request_without_waiting_for_timeout(self):
+        self.delay = 5
+        future = self.tasks.submit('test_connection', self.config)
+        self.assertTrue(self.received.wait(10))
+        started = time.monotonic()
+        self.tasks.close()
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertTrue(future.cancelled())
+
+
+if __name__ == '__main__':
+    unittest.main()

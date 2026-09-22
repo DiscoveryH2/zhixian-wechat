@@ -1,0 +1,13 @@
+#!/bin/sh
+# Install intentionally with: git config core.hooksPath .githooks
+# The Python guard independently verifies that Git root is not a user home.
+set -eu
+root=$(git rev-parse --show-toplevel) || exit 2
+cd "$root"
+if [ -x .venv/Scripts/python.exe ]; then
+    exec .venv/Scripts/python.exe scripts/check_secrets.py --staged
+elif [ -x .venv/bin/python ]; then
+    exec .venv/bin/python scripts/check_secrets.py --staged
+else
+    exec python scripts/check_secrets.py --staged
+fi

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="知弦 PC，在微信对话中理解语境、判断意图，并斟酌每一次回应。">
+  <meta name="color-scheme" content="light">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' qrc:; script-src 'self' qrc:; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>知弦 · 微信对话助手</title>
+  <link rel="icon" href="mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="refinement.css">
+  <script src="qrc:///qtwebchannel/qwebchannel.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到工作区</a>
+  <div id="app" class="app-shell">
+    <aside class="rail" aria-label="主导航">
+      <a class="brand" href="#workspace" aria-label="知弦首页"><img src="mark.svg" alt="知弦" width="38" height="38"></a>
+      <nav id="navigation"></nav>
+      <div class="rail-bottom">
+        <button id="compact-button" class="nav-button" title="切换悬浮精简模式" aria-label="切换悬浮精简模式"></button>
+        <span class="rail-version">PC <span id="version">1.1</span></span>
+      </div>
+    </aside>
+    <div class="app-body">
+      <header class="topbar">
+        <div class="product-name">知弦<span class="product-divider"></span><span class="product-subtitle">微信对话助手</span></div>
+        <div class="topbar-actions"><span id="demo-label" class="demo-label" hidden>演示数据 · 未连接微信</span><span id="global-status" class="status-chip"></span><button id="mini-expand" class="icon-button" title="回到完整工作台" hidden aria-label="回到完整工作台"></button></div>
+      </header>
+      <div id="offline-notice" class="notice notice-warn" hidden></div>
+      <main id="main" tabindex="-1"><div class="startup"><img src="mark.svg" width="48" height="48" alt=""><p>正在打开你的对话工作台</p><div class="startup-line"></div></div></main>
+      <footer class="app-footer"><span><i class="small-dot"></i> <span id="footer-status">正在初始化本地工作台</span></span><span id="footer-meta">Jev · 语境与判断</span></footer>
+    </div>
+  </div>
+  <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
+  <dialog id="editor" class="dialog"></dialog>
+</body>
+</html>
