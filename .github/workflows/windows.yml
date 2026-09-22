@@ -80,6 +80,10 @@ jobs:
             const version = match[1];
             const tag = `v${version}`;
             const { owner, repo } = context.repo;
+            const names = [`Zhixian-${version}-Windows.zip`, 'SHA256SUMS'];
+            for (const name of names) {
+              if (!fs.existsSync(path.join('outputs', name))) throw new Error(`Missing verified release asset: ${name}`);
+            }
             let release;
             try {
               release = (await github.rest.repos.getReleaseByTag({ owner, repo, tag })).data;
@@ -95,14 +99,16 @@ jobs:
                 body: 'Windows 便携版：完整解压后运行 Zhixian.exe。\n\n包含离线中文 OCR 与界面字体；首次使用填写 API Key、Base URL、Model name。\n\n由干净的公开源码构建，经过源码防泄漏检查、测试和打包诊断。发行包不包含个人配置、聊天记录或 API 密钥。请保留目录中的许可文件。'
               })).data;
             }
-            const names = [`Zhixian-${version}-Windows.zip`, 'SHA256SUMS.txt'];
             const existing = (await github.rest.repos.listReleaseAssets({ owner, repo, release_id: release.id })).data;
             for (const name of names) {
-              if (existing.some(asset => asset.name === name)) continue;
+              // A retry rebuilds the archive, so its checksum must travel with
+              // the same bytes. Replace only our two generated draft assets.
+              const prior = existing.find(asset => asset.name === name);
+              if (prior) await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: prior.id });
               const data = fs.readFileSync(path.join('outputs', name));
               await github.rest.repos.uploadReleaseAsset({ owner, repo, release_id: release.id,
                 name, data, headers: { 'content-type': name.endsWith('.zip') ? 'application/zip' : 'text/plain', 'content-length': data.length },
                 request: { timeout: 600000 } });
             }
-            await github.rest.repos.updateRelease({ owner, repo, release_id: release.id, draft: false });
+            await github.rest.repos.updateRelease({ owner, repo, release_id: release.id, target_commitish: context.sha, draft: false });
             core.info(release.html_url);
