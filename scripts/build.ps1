@@ -12,7 +12,10 @@ if (Test-Path -LiteralPath (Join-Path $appOutput 'data')) { throw 'This destinat
 if ($LASTEXITCODE -ne 0) { throw 'Font verification failed.' }
 & $pythonPath scripts/check_secrets.py --tree .
 if ($LASTEXITCODE -ne 0) { throw 'Source privacy check failed.' }
-$env:PATH = (Split-Path -Parent $pythonPath) + ';' + $env:SystemRoot + '\System32;' + $env:SystemRoot
+$gitExecutable = Get-Command git -ErrorAction SilentlyContinue
+$runtimePaths = @((Split-Path -Parent $pythonPath), ($env:SystemRoot + '\System32'), $env:SystemRoot)
+if ($gitExecutable) { $runtimePaths += Split-Path -Parent $gitExecutable.Source }
+$env:PATH = $runtimePaths -join ';'
 & $pythonPath -m unittest discover -s tests -v
 if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
 & $pythonPath -m PyInstaller --noconfirm --distpath $buildOutput --workpath work\build Zhixian.spec

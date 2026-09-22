@@ -79,7 +79,7 @@ class SecretPatternTests(unittest.TestCase):
 
     def test_output_never_contains_matched_values(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             (root / "src").mkdir()
             secret = synthetic_key()
             (root / "src/example.py").write_text(assignment(secret), encoding="utf-8")
@@ -103,7 +103,7 @@ class SecretPatternTests(unittest.TestCase):
 class SourceBoundaryTests(unittest.TestCase):
     def test_tree_never_reads_runtime_directories_or_state_files(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             for private in ("data", "work", "outputs", ".venv", ".git"):
                 (root / private).mkdir()
                 (root / private / "private.py").write_text(synthetic_key(), encoding="utf-8")
@@ -124,7 +124,7 @@ class SourceBoundaryTests(unittest.TestCase):
 
     def test_explicit_forbidden_file_blocked_without_read(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(Path, "read_bytes", side_effect=AssertionError("Must not read")):
-            findings, count = guard.scan_tree(Path(directory), ["data/credentials.json", "outputs/live-capture-check.json"])
+            findings, count = guard.scan_tree(Path(directory).resolve(), ["data/credentials.json", "outputs/live-capture-check.json"])
             self.assertEqual(count, 0)
             self.assertEqual({f.rule for f in findings}, {"private-runtime-file"})
 
@@ -154,7 +154,7 @@ class SourceBoundaryTests(unittest.TestCase):
 
     def test_explicit_path_through_link_ancestor_is_not_read(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             (root / "src/link").mkdir(parents=True)
             (root / "src/link/example.py").write_text(synthetic_key(), encoding="utf-8")
             original = Path.is_symlink
@@ -167,7 +167,7 @@ class SourceBoundaryTests(unittest.TestCase):
 
     def test_symlink_never_followed(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             (root / "src").mkdir()
             link = root / "src/link.py"
             try:
@@ -176,6 +176,38 @@ class SourceBoundaryTests(unittest.TestCase):
                 self.skipTest("Symlink creation unavailable")
             findings, _ = guard.scan_tree(root)
             self.assertIn("source-symlink-or-junction", {f.rule for f in findings})
+
+    def test_noncanonical_root_uses_canonical_read_paths(self):
+        with tempfile.TemporaryDirectory(prefix="zhixian-long-source-path-") as directory:
+            root = Path(directory).resolve()
+            (root / "src").mkdir()
+            (root / "src/main.py").write_text("print('public')", encoding="utf-8")
+            (root / "data").mkdir()
+            (root / "data/private.py").write_text(synthetic_key(), encoding="utf-8")
+            # Exercise a noncanonical spelling on every platform. Where NTFS
+            # supplies an 8.3 alias, also use the same spelling seen on CI.
+            alias = root / "src" / ".."
+            if os.name == "nt":
+                import ctypes
+                get_short = ctypes.windll.kernel32.GetShortPathNameW
+                get_short.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+                get_short.restype = ctypes.c_uint
+                needed = get_short(str(root), None, 0)
+                if needed:
+                    buffer = ctypes.create_unicode_buffer(needed)
+                    written = get_short(str(root), buffer, needed)
+                    if 0 < written < needed:
+                        alias = Path(buffer.value) / "src" / ".."
+            self.assertEqual(alias.resolve(), root)
+            real_read, reads = Path.read_bytes, []
+            def recording(path):
+                reads.append(path.relative_to(root).as_posix())
+                return real_read(path)
+            with patch.object(Path, "read_bytes", recording):
+                findings, count = guard.scan_tree(alias)
+            self.assertEqual(findings, [])
+            self.assertEqual(count, 1)
+            self.assertEqual(reads, ["src/main.py"])
 
 
 @unittest.skipUnless(shutil.which("git"), "Git unavailable")
