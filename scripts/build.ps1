@@ -17,7 +17,7 @@ $env:PATH = (Split-Path -Parent $pythonPath) + ';' + $env:SystemRoot + '\System3
 if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
 & $pythonPath -m PyInstaller --noconfirm --distpath $buildOutput --workpath work\build Zhixian.spec
 if ($LASTEXITCODE -ne 0) { throw 'Packaging failed.' }
-Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination (Join-Path $appOutput '使用说明.md')
+Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination (Join-Path $appOutput 'README.md')
 Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination (Join-Path $appOutput 'LICENSE')
 Copy-Item -LiteralPath (Join-Path $projectRoot 'THIRD_PARTY_NOTICES.md') -Destination (Join-Path $appOutput 'THIRD_PARTY_NOTICES.md')
 Copy-Item -LiteralPath (Join-Path $projectRoot 'docs') -Destination (Join-Path $appOutput 'docs') -Recurse
