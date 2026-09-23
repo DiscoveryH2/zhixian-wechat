@@ -6,7 +6,7 @@
 
 A Windows WeChat conversation assistant with local OCR, Jev judgments, and reply drafts. You stay in control of what gets sent.
 
-**当前版本：1.2.0** · [下载 Windows 便携版](https://github.com/DiscoveryH2/zhixian-wechat/releases/latest) · [快速开始](#快速开始) · [更新记录](CHANGELOG.md) · [路线图](docs/ROADMAP.md) · [隐私说明](docs/PRIVACY.md)
+**当前版本：1.2.0** · [下载 Windows 便携版](https://github.com/DiscoveryH2/zhixian-wechat/releases/latest) · [快速开始](#快速开始) · [更新记录](CHANGELOG.md) · [隐私说明](docs/PRIVACY.md)
 
 ## 看看界面
 

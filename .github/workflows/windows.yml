@@ -93,7 +93,8 @@ jobs:
             try {
               release = (await github.rest.repos.getReleaseByTag({ owner, repo, tag })).data;
               if (!release.draft) {
-                core.info(`Version ${tag} is already published; existing assets stay unchanged.`);
+                await github.rest.repos.updateRelease({ owner, repo, release_id: release.id, body: releaseBody });
+                core.info(`Version ${tag} release notes updated; existing assets stay unchanged.`);
                 return;
               }
             } catch (error) {
