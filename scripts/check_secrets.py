@@ -55,8 +55,15 @@ REVIEWED_ASSETS = {
     "ui/icon.ico": "5b9f0f1223d1d560ab3348f0cc5a47fc19e4d51b80c1ba9a7e9ee866c4c293f0",
     "ui/icon.png": "9c15e704220a0cf215a0ea5e0135cd4d81f32e6f25fe2f3e62cb2bb9de255486",
     "ui/fonts/NotoSansSC-Variable.ttf": "a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da",
-    "docs/images/workspace.png": "8f1b9d81b18c1b0d9e6ef38a8b58b090b8d1014cfcaf37f891454da979f87bbc",
-    "docs/images/compact.png": "2229a5d60c86fe48b8319f6fdb9c2b76632b4654a88038c6042a71055e88652b",
+    # Both versions were separately reviewed synthetic renders. Retain the
+    # previous hashes because --history also scans the earlier public commit.
+    "docs/images/workspace.png": ("8f1b9d81b18c1b0d9e6ef38a8b58b090b8d1014cfcaf37f891454da979f87bbc",
+                                  "37339b319ef8bf581700bf1d7c78129ef27a42e1e53aa9db41a041530c2f5ea9"),
+    "docs/images/compact.png": ("2229a5d60c86fe48b8319f6fdb9c2b76632b4654a88038c6042a71055e88652b",
+                                "2abf4924fd61a710de8f4d2c9b417eddbb639ea68f156ef7715470b6ab175078"),
+    "docs/images/intro.png": "28e2dd0bed30120175e8caac10192663f1e954a31c97fa85f302dd742e825745",
+    "docs/images/catalogue.png": "bf9dd39408256b49e128cbdb68a62daf4354ee3e4316ef0e34f75748cb6094dd",
+    "docs/images/moments.png": "b724624feb9313ba726136e17527018ee6f79d2409bdde4eefac5820e87af99e",
     "vendor/jev-chat-windows/docs/icon.ico": "fe7e379a97d323dddc1b3fac66d80fd9113ad1c08b0216d886cd2ba18b6788a9",
     "vendor/jev-chat-windows/docs/ui_home.png": "ef24f248cbe6cb8895a9a363845d857c80410d21c66910c52eea6ab2383ca9aa",
     "vendor/jev-chat-windows/docs/ui_settings.png": "83bc9bf2df279de0a29d908fa488632d2d085cb88b72a668b3458ee93cc303de",
@@ -185,7 +192,9 @@ def scan_blob(path: str, raw: bytes) -> list[Finding]:
     if len(raw) > _size_limit(path):
         return [Finding(path, "source-too-large-to-review")]
     if path in REVIEWED_ASSETS:
-        return [] if hashlib.sha256(raw).hexdigest() == REVIEWED_ASSETS[path] else [Finding(path, "reviewed-asset-hash-changed")]
+        pinned = REVIEWED_ASSETS[path]
+        accepted = (pinned,) if isinstance(pinned, str) else pinned
+        return [] if hashlib.sha256(raw).hexdigest() in accepted else [Finding(path, "reviewed-asset-hash-changed")]
     try:
         # Explicit BOMs are supported; unknown binary encodings fail closed.
         if raw.startswith((b"\xff\xfe", b"\xfe\xff")):

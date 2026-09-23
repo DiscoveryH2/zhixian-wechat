@@ -112,3 +112,6 @@ dist/
 !vendor/jev-chat-windows/docs/ui_toggle_off.png
 !docs/images/workspace.png
 !docs/images/compact.png
+!docs/images/intro.png
+!docs/images/catalogue.png
+!docs/images/moments.png

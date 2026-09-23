@@ -17,8 +17,11 @@ DEFAULTS = {
     'auto_analyze': True, 'context_limit': 30, 'save_history': False,
     'always_on_top': False, 'source': 'ocr', 'weflow_url': 'http://127.0.0.1:5031',
     'debounce_ms': 1200,
+    'theme': 'night', 'font_scale': 1.0,
+    'vision_model': '', 'vision_base_url': '', 'stt_model': '', 'stt_base_url': '',
+    'stt_backend': 'auto', 'stt_local_model': '', 'media_allow_cloud': False,
 }
-SECRETS = ('api_key', 'reply_api_key', 'weflow_token')
+SECRETS = ('api_key', 'reply_api_key', 'weflow_token', 'vision_api_key', 'stt_api_key')
 
 
 class Blob(ctypes.Structure):
@@ -98,7 +101,9 @@ class Store:
         with self.lock:
             return {**self.config, 'has_api_key': bool(self.secrets['api_key']),
                     'has_reply_api_key': bool(self.secrets['reply_api_key']),
-                    'weflow_has_token': bool(self.secrets['weflow_token'])}
+                    'weflow_has_token': bool(self.secrets['weflow_token']),
+                    'has_vision_api_key': bool(self.secrets['vision_api_key']),
+                    'has_stt_api_key': bool(self.secrets['stt_api_key'])}
 
     def merged(self, changes):
         result = self.full_config()
@@ -112,7 +117,8 @@ class Store:
     def save_config(self, changes):
         with self.lock:
             config = self.merged(changes)
-            for key in ('base_url', 'model_name', 'reply_model', 'reply_base_url', 'style', 'relationship', 'weflow_url', 'reply_to'):
+            for key in ('base_url', 'model_name', 'reply_model', 'reply_base_url', 'style', 'relationship', 'weflow_url', 'reply_to',
+                        'vision_model', 'vision_base_url', 'stt_model', 'stt_base_url', 'stt_local_model'):
                 config[key] = str(config.get(key, '')).strip()[:8000 if key == 'style' else 2000]
             if not config['base_url'] or not config['model_name']:
                 raise ValueError('请填写 Base URL 和模型名称。')
@@ -121,11 +127,25 @@ class Store:
             config['base_url'] = validate_url(config['base_url'])
             if config['reply_base_url']:
                 config['reply_base_url'] = validate_url(config['reply_base_url'])
+            for field in ('vision_base_url', 'stt_base_url'):
+                if config[field]:
+                    config[field] = validate_url(config[field])
             config['weflow_url'] = validate_weflow(config['weflow_url'])
             config['context_limit'] = min(200, max(3, int(config['context_limit'])))
             config['debounce_ms'] = min(10000, max(400, int(config['debounce_ms'])))
-            for key in ('auto_analyze', 'save_history', 'always_on_top'):
+            for key in ('auto_analyze', 'save_history', 'always_on_top', 'media_allow_cloud'):
                 config[key] = bool(config[key])
+            if config['theme'] not in ('night', 'paper'):
+                raise ValueError('不支持的界面风格。')
+            try:
+                font_scale = float(config['font_scale'])
+            except (TypeError, ValueError):
+                raise ValueError('字体大小需要在 90% 到 130% 之间。') from None
+            if font_scale not in (0.9, 1.0, 1.1, 1.2, 1.3):
+                raise ValueError('字体大小需要在 90% 到 130% 之间。')
+            config['font_scale'] = font_scale
+            if config['stt_backend'] not in ('auto', 'local', 'cloud'):
+                raise ValueError('语音识别来源配置无效。')
             if config['source'] not in ('ocr', 'weflow', 'auto'):
                 raise ValueError('不支持的消息来源。')
             for key in SECRETS:

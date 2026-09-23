@@ -142,7 +142,9 @@ def main():
 
     url = QUrl.fromLocalFile(str(assets / 'ui' / 'index.html'))
     if args.demo:
-        url.setQuery('demo=1')
+        # Screenshot mode targets the actual workspace; normal demo launch
+        # still plays the complete cinematic introduction.
+        url.setQuery('demo=1&intro=0' if args.screenshot else 'demo=1')
     view.load(url)
     window.show()
     if args.start_capture and not args.demo:

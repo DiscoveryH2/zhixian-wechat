@@ -2,16 +2,22 @@
 from __future__ import annotations
 
 import copy
+import base64
 import hashlib
 import json
 import os
+import threading
 import time
+import uuid
+from collections import OrderedDict
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QFileDialog
 
 from .store import Store
+from .imports import ChatLabImporter
+from .datahub import DataHub
 from .version import VERSION
 from .tasks import ModelTasks, HelperTasks
 
@@ -22,11 +28,17 @@ class Controller(QObject):
     captureEvent = Signal(str, dict)
     analysisDone = Signal(str, int, str, object, object)
     windowAction = Signal(str, object)
+    dataEvent = Signal(str, object)
+    sessionLoaded = Signal(str, object, object)
+    importFinished = Signal(object, object)
+    mediaFinished = Signal(str, str, object, object)
 
     def __init__(self, directory: Path):
         super().__init__()
         from .capture_service import CaptureService
         self.store = Store(directory)
+        self.imports = ChatLabImporter(directory)
+        self.hub = DataHub(on_update=lambda kind, data: self.dataEvent.emit(kind, data))
         self.capture = CaptureService(lambda k, p: self.captureEvent.emit(k, p))
         self.pool = HelperTasks()
         self.models = ModelTasks()
@@ -34,6 +46,18 @@ class Controller(QObject):
         self.results, self.result_fingerprints = {}, {}
         self.current_id = next(iter(self.sessions), None)
         self.live_id = None
+        self.follow_live = True
+        self.catalog = {'source': 'local', 'scope': 'collected_only', 'available': bool(self.imports.count()),
+                        'loaded': len(self.sessions), 'imported': self.imports.count(), 'preview_updates': []}
+        self.catalog_cursors = OrderedDict()
+        self.catalog_lock = threading.RLock()
+        self.catalog_items = OrderedDict()
+        self.moments = {'items': [], 'available': False, 'source': 'local', 'warning': '尚无朋友圈数据源'}
+        self.manual_moments = OrderedDict()
+        self.moment_posts = OrderedDict()
+        self.media_cache = OrderedDict()
+        self.media_inputs = OrderedDict()
+        self.background_url = self._background_url()
         self.status = {'capture': 'idle', 'analysis': 'idle', 'detail': '配置接口后，开始读取微信当前会话。',
                        'last_error': self.store.error, 'source': 'ocr', 'connected': False}
         self.revision, self.job_serial = 0, 0
@@ -48,6 +72,348 @@ class Controller(QObject):
         self.timer.timeout.connect(self._run_pending)
         self.captureEvent.connect(self._on_capture)
         self.analysisDone.connect(self._on_analysis)
+        self.dataEvent.connect(self._on_data)
+        self.sessionLoaded.connect(self._on_session_loaded)
+        self.importFinished.connect(self._on_import_finished)
+        self.mediaFinished.connect(self._on_media_finished)
+        self._sync_hub()
+        if self.store.config['source'] in ('weflow', 'auto') and self.store.secrets['weflow_token']:
+            self.hub.prewarm(self.store.full_config(), limit=5)
+
+    def _background_url(self):
+        target = self.store.directory / 'background.jpg'
+        if not target.is_file() or target.stat().st_size > 1024 * 1024:
+            return ''
+        return 'data:image/jpeg;base64,' + base64.b64encode(target.read_bytes()).decode('ascii')
+
+    def _appearance(self):
+        return {'theme': self.store.config['theme'], 'font_scale': self.store.config['font_scale'],
+                'background_url': self.background_url}
+
+    def _sync_hub(self):
+        self.hub.set_local_sessions(self.sessions)
+
+    def _remember_catalog(self, items):
+        with self.catalog_lock:
+            for item in items:
+                if item.get('id'):
+                    self.catalog_items[item['id']] = dict(item)
+                    self.catalog_items.move_to_end(item['id'])
+            while len(self.catalog_items) > 5000:
+                self.catalog_items.popitem(last=False)
+
+    def _catalog_cursor(self, state):
+        ident = uuid.uuid4().hex
+        with self.catalog_lock:
+            self.catalog_cursors[ident] = (time.monotonic(), state)
+            while len(self.catalog_cursors) > 300:
+                self.catalog_cursors.popitem(last=False)
+        return ident
+
+    def _read_catalog_cursor(self, value, source, query):
+        with self.catalog_lock:
+            entry = self.catalog_cursors.get(str(value or ''))
+        if not entry or time.monotonic() - entry[0] > 600 or entry[1]['source'] != source or entry[1]['query'] != query:
+            raise ValueError('会话分页已过期，请重新搜索。')
+        return copy.deepcopy(entry[1])
+
+    def _import_folder_task(self, root):
+        """Enumerate and index a chosen export directory off the UI thread."""
+        root = Path(root).resolve()
+        files = []
+        for path in root.rglob('*'):
+            try:
+                if (not path.is_file() or path.suffix.lower() not in ('.json', '.jsonl')
+                        or not path.resolve().is_relative_to(root)
+                        or path.stat().st_size > 1024 * 1024 * 1024):
+                    continue
+                with path.open('rb') as stream:
+                    head = stream.read(4096)
+                if b'"chatlab"' not in head and not (b'"_type"' in head and b'"header"' in head):
+                    continue
+                files.append(str(path))
+                if len(files) > 5000:
+                    raise ValueError('目录中超过 5000 份聊天文件，请分批导入。')
+            except OSError:
+                continue
+        if not files:
+            raise ValueError('目录中没有可识别的 ChatLab JSON/JSONL 文件。')
+        aggregate = {'success': True, 'sessions': 0, 'messages': 0, 'items': [], 'skipped': 0}
+        for index, filename in enumerate(files, 1):
+            try:
+                result = self.imports.import_files([filename])
+                aggregate['sessions'] += result['sessions']
+                aggregate['messages'] += result['messages']
+                aggregate['items'].extend(result['items'])
+            except (OSError, ValueError, json.JSONDecodeError):
+                aggregate['skipped'] += 1
+            self.dataEvent.emit('import_progress', {'files_done': index, 'files_total': len(files),
+                                'messages': aggregate['messages'], 'sessions': aggregate['sessions']})
+        if not aggregate['sessions']:
+            raise ValueError('未成功导入任何 ChatLab 会话，请检查导出格式与帐号 ID。')
+        return aggregate
+
+    @staticmethod
+    def _catalog_item(item):
+        result = dict(item)
+        result['is_group'] = item.get('type') == 'group' or str(item.get('talker') or '').endswith('@chatroom')
+        return result
+
+    def _list_sessions_task(self, config, query, cursor, limit, source, collected_snapshot=None):
+        query = str(query or '').strip()[:100]
+        limit = min(50, max(1, int(limit or 20)))
+        source = source if source in ('all', 'weflow', 'import', 'collected') else 'all'
+        if source == 'import':
+            result = self.imports.list_sessions(query, cursor, limit)
+        elif source == 'collected':
+            state = self._read_catalog_cursor(cursor, source, query) if cursor else {'offset': 0}
+            rows = [self._catalog_item({'id': item['id'], 'title': item['title'], 'source': item.get('source', 'ocr'),
+                     'type': item.get('type', 'unknown'), 'preview': (item.get('messages') or [{}])[-1].get('text', '')[:140],
+                     'updated': item.get('updated'), 'count': len(item.get('messages', []))})
+                    for item in (collected_snapshot or []) if item.get('source') != 'import' and query.casefold() in item.get('title', '').casefold()]
+            rows.sort(key=lambda row: row.get('updated') or 0, reverse=True)
+            offset = state['offset']
+            next_cursor = self._catalog_cursor({'source': source, 'query': query, 'offset': offset + limit}) if offset + limit < len(rows) else None
+            result = {'items': rows[offset:offset + limit], 'next_cursor': next_cursor, 'has_more': bool(next_cursor),
+                      'source': 'collected', 'scope': 'collected_only', 'available': False, 'total': len(rows),
+                      'warning': '这里仅包含知弦已经读取的会话。'}
+        elif source == 'weflow':
+            if not config.get('weflow_token'):
+                result = {'items': [], 'next_cursor': None, 'has_more': False, 'source': 'weflow',
+                          'scope': 'unavailable', 'available': False, 'warning': '需要在高级设置连接本机 WeFlow 服务。'}
+            else:
+                result = self.hub.list_sessions({**config, 'source': 'weflow'}, query, cursor, limit)
+        else:
+            state = self._read_catalog_cursor(cursor, source, query) if cursor else {
+                'source': source, 'query': query, 'hub_buf': [], 'imp_buf': [],
+                'hub_cursor': None, 'imp_cursor': None, 'hub_more': True, 'imp_more': True,
+                'seen': [], 'hub_warning': None, 'hub_available': False,
+            }
+            output = []
+            attempts = 0
+            while len(output) < limit and attempts < limit * 5 + 4:
+                attempts += 1
+                if not state['hub_buf'] and state['hub_more']:
+                    cfg = {**config, 'source': 'weflow'} if config.get('weflow_token') else {**config, 'source': 'ocr'}
+                    page = self.hub.list_sessions(cfg, query, state['hub_cursor'], limit)
+                    state['hub_buf'] = [self._catalog_item(item) for item in page['items']]
+                    state['hub_cursor'], state['hub_more'] = page.get('next_cursor'), bool(page.get('has_more'))
+                    state['hub_warning'], state['hub_available'] = page.get('warning'), bool(page.get('available'))
+                if not state['imp_buf'] and state['imp_more']:
+                    page = self.imports.list_sessions(query, state['imp_cursor'], limit)
+                    state['imp_buf'] = [self._catalog_item(item) for item in page['items']]
+                    state['imp_cursor'], state['imp_more'] = page.get('next_cursor'), bool(page.get('has_more'))
+                candidates = [(state[k][0].get('updated') or 0, k) for k in ('hub_buf', 'imp_buf') if state[k]]
+                if not candidates:
+                    break
+                _, selected = max(candidates)
+                item = state[selected].pop(0)
+                if item['id'] not in state['seen']:
+                    output.append(item)
+                    state['seen'].append(item['id'])
+                    state['seen'] = state['seen'][-5000:]
+            more = bool(state['hub_buf'] or state['imp_buf'] or state['hub_more'] or state['imp_more'])
+            next_cursor = self._catalog_cursor(state) if more and output else None
+            archive_count = self.imports.count()
+            result = {'items': output, 'next_cursor': next_cursor, 'has_more': bool(next_cursor),
+                      'source': 'mixed' if archive_count and state['hub_available'] else 'weflow' if state['hub_available'] else 'local',
+                      'scope': 'all_available' if state['hub_available'] else 'imported_archive' if archive_count else 'collected_only',
+                      'available': bool(state['hub_available'] or archive_count),
+                      'warning': state['hub_warning'], 'total_loaded': len(output)}
+        result['items'] = [self._catalog_item(item) for item in result.get('items', [])]
+        result['detail'] = result.get('warning') or ''
+        self._remember_catalog(result['items'])
+        self.dataEvent.emit('catalog_meta', {key: result.get(key) for key in ('source', 'scope', 'available', 'warning', 'total_loaded')})
+        return result
+
+    def _session_page_task(self, config, sid, cursor=None, limit=50):
+        if sid.startswith('import:'):
+            return self.imports.messages(sid, cursor, limit)
+        return self.hub.messages(config, sid, cursor, limit)
+
+    def _session_first_page(self, config, sid):
+        page = self._session_page_task(config, sid, None, 50)
+        if not page.get('available') and not page.get('items'):
+            raise ValueError(page.get('warning') or '无法读取这个会话，请检查数据源。')
+        if sid.startswith('import:'):
+            meta = self.imports.get_session(sid)
+        else:
+            with self.catalog_lock:
+                meta = copy.deepcopy(self.catalog_items.get(sid))
+        if not meta:
+            raise ValueError('会话目录已过期，请重新打开会话选择窗口。')
+        return {'session': {'id': sid, 'title': meta.get('title') or '未命名会话',
+                'source': meta.get('source') or page.get('source'), 'type': meta.get('type'),
+                'messages': page.get('items', []), 'updated': meta.get('updated') or 0,
+                'next_cursor': page.get('next_cursor'), 'has_more': bool(page.get('has_more'))},
+                'page': page}
+
+    def _load_page(self, config, sid, cursor=None, limit=30):
+        page = self._session_page_task(config, sid, cursor, limit)
+        return page
+
+    def _list_moments_task(self, config, sid, cursor, limit):
+        with self.catalog_lock:
+            selected = copy.deepcopy(self.catalog_items.get(sid)) if sid else None
+        if sid and not selected:
+            selected = self.imports.get_session(sid)
+        username = selected.get('talker') if selected and selected.get('source') == 'weflow' else ''
+        if sid and not username:
+            page = {'items': [], 'next_cursor': None, 'has_more': False, 'source': 'local',
+                    'available': False, 'scope': 'collected_only',
+                    'warning': '这位联系人没有可用的朋友圈帐号映射；可以手动补充其动态。'}
+        else:
+            page = self.hub.moments({**config, 'source': 'weflow'}, username or '', cursor, limit)
+        with self.catalog_lock:
+            manual = [copy.deepcopy(p) for p in reversed(self.manual_moments.values())
+                      if not sid or p.get('session_id') == sid]
+        if not cursor:
+            page['items'] = manual + page.get('items', [])
+        page['detail'] = page.get('warning') or ''
+        page['available'] = bool(page.get('available') or manual)
+        with self.catalog_lock:
+            for post in page['items']:
+                self.moment_posts[post['id']] = dict(post)
+                self.moment_posts.move_to_end(post['id'])
+            while len(self.moment_posts) > 500:
+                self.moment_posts.popitem(last=False)
+        self.dataEvent.emit('moments_meta', {'available': page['available'], 'source': page['source'],
+                                            'warning': page.get('warning')})
+        return page
+
+    def _media_bytes(self, config, sid, mid, asset_id=None):
+        with self.catalog_lock:
+            chosen = self.media_inputs.get(mid)
+        if chosen:
+            data, mime, kind = chosen
+            return {'status': 'ok', 'kind': kind, 'mime_type': mime, 'data': data, 'source': 'user_selected'}
+        if str(sid).startswith('import:'):
+            media = self.imports.resolve_media(sid, mid)
+            if media.get('status') != 'ok':
+                return {'status': 'unavailable', 'reason': media.get('reason', '媒体尚不可用')}
+            return {'status': 'ok', 'kind': media['kind'], 'mime_type': media['mime_type'],
+                    'data': media['data'], 'source': 'user_selected'}
+        if not asset_id:
+            for item in self.sessions.get(sid, {}).get('messages', []):
+                if item.get('id') == mid:
+                    asset_id = next((m.get('id') for m in item.get('media', []) if m.get('id')), None)
+                    break
+        if not asset_id:
+            return {'status': 'unavailable', 'reason': '当前来源没有可读取的媒体文件；可从微信保存后手动选择。'}
+        resolved = self.hub.resolve_media({**config, 'source': 'weflow'}, asset_id)
+        if resolved.get('status') != 'available':
+            return {'status': 'unavailable', 'reason': resolved.get('reason', '媒体尚不可用')}
+        data_url = resolved.get('data_url') or ''
+        if len(data_url) > 28 * 1024 * 1024 or ';base64,' not in data_url:
+            return {'status': 'unavailable', 'reason': '媒体格式或体积不受支持。'}
+        try:
+            raw = base64.b64decode(data_url.split(';base64,', 1)[1], validate=True)
+        except (ValueError, base64.binascii.Error):
+            return {'status': 'unavailable', 'reason': '媒体数据无法解码。'}
+        return {'status': 'ok', 'kind': resolved['kind'], 'mime_type': resolved['mime_type'],
+                'data': raw, 'source': 'weflow_local'}
+
+    def _preview_media(self, config, sid, mid, asset_id=None):
+        result = self._media_bytes(config, sid, mid, asset_id)
+        if result['status'] != 'ok':
+            return {**result, 'available': False, 'success': False, 'message': result.get('reason')}
+        if result['kind'] == 'image':
+            from io import BytesIO
+            from PIL import Image, ImageOps
+            try:
+                if len(result['data']) > 12 * 1024 * 1024:
+                    raise ValueError('too large')
+                with Image.open(BytesIO(result['data'])) as image:
+                    if image.width * image.height > 30_000_000:
+                        raise ValueError('too many pixels')
+                    image = ImageOps.exif_transpose(image)
+                    image.thumbnail((960, 960))
+                    canvas = Image.new('RGB', image.size, '#f6f8f7')
+                    canvas.paste(image.convert('RGB'))
+                    output = BytesIO()
+                    canvas.save(output, 'JPEG', quality=78, optimize=True)
+                    payload, mime = output.getvalue(), 'image/jpeg'
+            except (OSError, ValueError, Image.DecompressionBombError):
+                return {'status': 'unavailable', 'available': False, 'success': False,
+                        'reason': '此图片格式无法在本机预览。'}
+        elif result['kind'] == 'voice':
+            payload, mime = result['data'], result['mime_type']
+            if len(payload) > 12 * 1024 * 1024:
+                return {'status': 'unavailable', 'available': False, 'success': False,
+                        'reason': '语音文件过大，请先压缩或转写。'}
+        else:
+            return {'status': 'unavailable', 'available': False, 'success': False,
+                    'reason': '当前预览仅支持图片与语音。'}
+        return {'status': 'ok', 'available': True, 'success': True, 'kind': result['kind'], 'mime_type': mime,
+                'data_url': 'data:' + mime + ';base64,' + base64.b64encode(payload).decode('ascii')}
+
+    def _media_model_task(self, config, sid, mid, kind, asset_id=None, chosen=None):
+        if chosen:
+            source = 'user_selected'
+            data, mime = chosen
+        else:
+            media = self._media_bytes(config, sid, mid, asset_id)
+            if media['status'] != 'ok':
+                return {'success': False, 'available': False, 'status': 'unsupported',
+                        'message': media.get('reason', '媒体尚不可用')}
+            source, data, mime = media['source'], media['data'], media['mime_type']
+        cfg = {**config, 'media_allow_cloud': True}  # This call follows a user click.
+        task = 'analyze_image' if kind == 'image' else 'transcribe_audio'
+        result = self.models.submit(task, {'data': data, 'mime_type': mime, 'config': cfg, 'source': source}).result(timeout=180)
+        if not result.get('success'):
+            return {'success': False, 'available': False, 'status': result.get('status'),
+                    'message': result.get('warning') or '模型无法处理所选媒体。'}
+        if not result.get('text'):
+            return {'success': False, 'available': False, 'status': 'empty',
+                    'message': result.get('warning') or '没有识别出可用内容。'}
+        return {'success': True, 'available': True, 'kind': kind, 'text': result.get('text', ''),
+                'description': result.get('text', '') if kind == 'image' else None,
+                'transcript': result.get('text', '') if kind == 'voice' else None,
+                'model': result.get('model'), 'warning': result.get('warning'),
+                'message': result.get('warning')}
+
+    def _analyze_moment_task(self, cfg, post, sid):
+        history = []
+        if sid:
+            if sid.startswith('import:'):
+                history = self.imports.messages(sid, limit=30).get('items', [])
+            else:
+                history = copy.deepcopy(self.sessions.get(sid, {}).get('messages', [])[-30:])
+                if not history and sid.startswith('weflow:'):
+                    history = self.hub.messages({**cfg, 'source': 'weflow'}, sid, limit=30).get('items', [])
+        contact = next((entry for entry in self.store.contacts if post.get('author') in [entry['name'], *entry['aliases']]), None)
+        relationship = contact.get('relationship') if contact else cfg.get('relationship', '朋友')
+        details = {'id': post['id'], 'text': post.get('text', ''), 'author': post.get('author', ''),
+                   'image_descriptions': post.get('image_descriptions', [])}
+        image_assets = [item for item in post.get('media', []) if item.get('id') and item.get('kind') == 'image']
+        media_warning = ''
+        if image_assets and not details['image_descriptions']:
+            # The explicit Analyze action may use the first available picture.
+            resolved = self._media_bytes(cfg, sid or '', '', image_assets[0]['id'])
+            if resolved.get('status') == 'ok':
+                seen = self.models.submit('analyze_image', {'data': resolved['data'], 'mime_type': resolved['mime_type'],
+                     'config': {**cfg, 'media_allow_cloud': True}, 'source': resolved['source']}).result(timeout=180)
+                if seen.get('success') and seen.get('text'):
+                    details['image_descriptions'] = [seen['text']]
+                    if len(image_assets) > 1:
+                        media_warning = '只识别了第一张可用配图，其余配图未用于判断。'
+                else:
+                    media_warning = seen.get('warning') or '配图暂时无法识别，以下仅依据文字判断。'
+            else:
+                media_warning = resolved.get('reason', '配图未能读取，以下仅依据文字判断。')
+        if not details['text'] and not details['image_descriptions']:
+            return {'available': False, 'message': '这条动态只有未能识别的配图，请先提供可用图片。'}
+        result = self.models.submit('analyze_moment', {'post': details, 'relationship': relationship or '朋友',
+                          'history': history, 'config': cfg}).result(timeout=180)
+        if sid and not history:
+            media_warning += ' 未取得这位好友的聊天历史，建议仅依据当前动态。'
+        if media_warning:
+            result['warning'] = (result.get('warning') or '') + ' ' + media_warning.strip()
+        like = result.get('like_recommendation')
+        return {**result, 'available': True, 'like': True if like == 'like' else False if like == 'skip' else None,
+                'recommendation': result.get('comment_label') or result.get('like_label'),
+                'reason': result.get('topic') or result.get('warning'),
+                'comments': [item['text'] for item in result.get('candidates', []) if item.get('text')]}
 
     def snapshot(self):
         current = copy.deepcopy(self.sessions.get(self.current_id))
@@ -60,6 +426,8 @@ class Controller(QObject):
         return {'config': self.store.public_config(), 'status': dict(self.status), 'sessions': session_list,
                 'current_session': current, 'analysis': copy.deepcopy(self.results.get(self.current_id)),
                 'notes': copy.deepcopy(self.store.notes), 'contacts': copy.deepcopy(self.store.contacts),
+                'catalog': copy.deepcopy(self.catalog), 'moments': copy.deepcopy(self.moments),
+                'appearance': self._appearance(),
                 'version': VERSION}
 
     def emit(self):
@@ -74,6 +442,166 @@ class Controller(QObject):
     def handle(self, method, params):
         if method == 'bootstrap':
             return self.snapshot()
+        if method == 'list_sessions':
+            config = self.store.full_config()
+            # The worker must not iterate mutable Qt-owned session state.
+            collected = copy.deepcopy(list(self.sessions.values())) if params.get('source') == 'collected' else None
+            return self.pool.submit(self._list_sessions_task, config, params.get('query', ''),
+                                    params.get('cursor'), params.get('limit', 20), params.get('source', 'all'), collected)
+        if method == 'list_moments':
+            config = self.store.full_config()
+            return self.pool.submit(self._list_moments_task, config, params.get('session_id'),
+                                    params.get('cursor'), min(50, max(1, int(params.get('limit') or 20))))
+        if method == 'manual_moment':
+            author = str(params.get('author') or '').strip()[:200]
+            content = str(params.get('text') or '').strip()[:16000]
+            if not author or not content:
+                raise ValueError('请填写好友名称和动态内容。')
+            sid = str(params.get('session_id') or '')[:256]
+            item = {'id': 'manual-moment:' + uuid.uuid4().hex, 'author': author, 'username': '',
+                    'session_id': sid or None, 'text': content, 'timestamp': time.time(),
+                    'media': [], 'source': 'manual'}
+            with self.catalog_lock:
+                self.manual_moments[item['id']] = item
+                self.moment_posts[item['id']] = item
+                while len(self.manual_moments) > 200:
+                    self.manual_moments.popitem(last=False)
+            self.emit()
+            return {'success': True, 'available': True, 'item': item}
+        if method == 'analyze_moment':
+            ident = str(params.get('moment_id') or '')[:256]
+            with self.catalog_lock:
+                post = copy.deepcopy(self.moment_posts.get(ident))
+            if not post:
+                raise ValueError('这条动态已过期，请刷新后再分析。')
+            sid = str(params.get('session_id') or post.get('session_id') or '')[:256]
+            if not self.store.secrets['api_key']:
+                raise ValueError('请先在设置中填写 Jev API Key。')
+            return self.pool.submit(self._analyze_moment_task, self.store.full_config(), post, sid)
+        if method == 'import_chat_records':
+            mode = params.get('mode') or 'files'
+            if mode == 'folder':
+                directory = QFileDialog.getExistingDirectory(None, '选择 ChatLab 导出目录')
+                if not directory:
+                    return {'cancelled': True}
+                root = Path(directory)
+                future = self.pool.submit(self._import_folder_task, root)
+                future.add_done_callback(lambda done: self._emit_import_done(done))
+                return future
+            elif mode == 'files':
+                files, _ = QFileDialog.getOpenFileNames(None, '选择 ChatLab JSON/JSONL', '', 'ChatLab 文件 (*.json *.jsonl)')
+            else:
+                raise ValueError('导入方式无效。')
+            if not files:
+                if mode == 'folder':
+                    raise ValueError('目录中没有可识别的 ChatLab JSON/JSONL 文件。')
+                return {'cancelled': True}
+            future = self.pool.submit(self.imports.import_files, files,
+                    lambda progress: self.dataEvent.emit('import_progress', progress))
+            future.add_done_callback(lambda done: self._emit_import_done(done))
+            return future
+        if method == 'load_session_messages':
+            sid = str(params.get('session_id') or '')[:256]
+            if not sid:
+                raise ValueError('请选择一个会话。')
+            future = self.pool.submit(self._load_page, self.store.full_config(), sid,
+                                      params.get('cursor'), min(100, max(1, int(params.get('limit') or 30))))
+            future.add_done_callback(lambda done: self._emit_session_done(sid, 'older', done))
+            return future
+        if method == 'load_media':
+            sid, mid = str(params.get('session_id') or ''), str(params.get('message_id') or '')
+            return self.pool.submit(self._preview_media, self.store.full_config(), sid, mid,
+                                    params.get('asset_id'))
+        if method in ('analyze_image', 'transcribe_voice'):
+            sid, mid = str(params.get('session_id') or ''), str(params.get('message_id') or '')
+            if not sid or not mid:
+                raise ValueError('需要明确的会话与消息。')
+            kind = 'image' if method == 'analyze_image' else 'voice'
+            future = self.pool.submit(self._media_model_task, self.store.full_config(), sid, mid,
+                                      kind, params.get('asset_id'))
+            future.add_done_callback(lambda done: self._emit_media_done(sid, mid, done))
+            return future
+        if method == 'choose_media':
+            sid = str(params.get('session_id') or self.current_id or '')
+            if not sid or sid not in self.sessions:
+                raise ValueError('请先选择需要补充的会话。')
+            kind = params.get('kind')
+            if kind not in ('image', 'voice'):
+                raise ValueError('仅支持选择图片或语音文件。')
+            file_filter = '图片 (*.png *.jpg *.jpeg *.webp *.gif)' if kind == 'image' else '语音 (*.wav *.mp3 *.m4a *.ogg *.opus *.flac)'
+            filename, _ = QFileDialog.getOpenFileName(None, '选择需要理解的本机媒体', '', file_filter)
+            if not filename:
+                return {'cancelled': True}
+            from mimetypes import guess_type
+            path = Path(filename)
+            limit = 8 * 1024 * 1024 if kind == 'image' else 20 * 1024 * 1024
+            if path.stat().st_size > limit:
+                raise ValueError('媒体文件过大，请缩小后再试。')
+            mime = guess_type(path.name)[0] or 'application/octet-stream'
+            data = path.read_bytes()
+            mid = 'manual-media:' + uuid.uuid4().hex
+            with self.catalog_lock:
+                self.media_inputs[mid] = (data, mime, kind)
+                self.media_inputs.move_to_end(mid)
+                while len(self.media_inputs) > 10:
+                    self.media_inputs.popitem(last=False)
+            session = self.sessions[sid]
+            session['messages'].append({'id': mid, 'side': 'other', 'sender': '手动提供',
+                         'kind': kind, 'text': '[图片]' if kind == 'image' else '[语音]',
+                         'timestamp': time.time(), 'source': 'manual_media', 'media': []})
+            self.emit()
+            future = self.pool.submit(self._media_model_task, self.store.full_config(), sid, mid,
+                                      kind, None, (data, mime))
+            future.add_done_callback(lambda done: self._emit_media_done(sid, mid, done))
+            return future
+        if method == 'set_appearance':
+            config = {}
+            if 'theme' in params:
+                config['theme'] = params['theme']
+            if 'font_scale' in params:
+                config['font_scale'] = params['font_scale']
+            self.store.save_config(config)
+            self.emit()
+            return {'success': True, 'appearance': self._appearance()}
+        if method == 'choose_background':
+            filename, _ = QFileDialog.getOpenFileName(None, '选择知弦背景图片', '', '图片 (*.png *.jpg *.jpeg *.webp)')
+            if not filename:
+                return {'cancelled': True, 'appearance': self._appearance()}
+            from PIL import Image, ImageOps
+            from io import BytesIO
+            path = Path(filename)
+            if path.stat().st_size > 15 * 1024 * 1024:
+                raise ValueError('背景图片超过 15 MB，请先缩小。')
+            try:
+                with Image.open(path) as image:
+                    if image.width * image.height > 30_000_000:
+                        raise ValueError('背景图片像素过大。')
+                    image = ImageOps.exif_transpose(image)
+                    image.thumbnail((1920, 1200))
+                    canvas = image.convert('RGB')
+                    for quality in (75, 62, 50):
+                        output = BytesIO()
+                        canvas.save(output, 'JPEG', quality=quality, optimize=True)
+                        data = output.getvalue()
+                        if len(data) <= 1024 * 1024:
+                            break
+                        canvas.thumbnail((int(canvas.width * .8), int(canvas.height * .8)))
+                    if len(data) > 1024 * 1024:
+                        raise ValueError('背景图片无法压缩至安全大小，请选择另一张。')
+            except (OSError, Image.DecompressionBombError):
+                raise ValueError('无法读取此图片，请选择 PNG、JPEG 或 WebP。') from None
+            target = self.store.directory / 'background.jpg'
+            temporary = target.with_suffix('.jpg.tmp')
+            temporary.write_bytes(data)
+            os.replace(temporary, target)
+            self.background_url = self._background_url()
+            self.emit()
+            return {'success': True, 'appearance': self._appearance()}
+        if method == 'clear_background':
+            (self.store.directory / 'background.jpg').unlink(missing_ok=True)
+            self.background_url = ''
+            self.emit()
+            return {'success': True, 'appearance': self._appearance()}
         if method == 'save_config':
             self.store.save_config(params.get('config', {}))
             self.revision += 1
@@ -108,8 +636,11 @@ class Controller(QObject):
         if method == 'select_session':
             ident = params.get('session_id')
             if ident not in self.sessions:
-                raise ValueError('会话不存在。')
+                future = self.pool.submit(self._session_first_page, self.store.full_config(), str(ident or '')[:256])
+                future.add_done_callback(lambda done: self._emit_session_done(str(ident or ''), 'select', done))
+                return future
             self.current_id = ident
+            self.follow_live = ident == self.live_id
             self.emit()
             return self.snapshot()
         if method == 'analyze':
@@ -159,9 +690,11 @@ class Controller(QObject):
             self.sessions.clear()
             self.results.clear()
             self.result_fingerprints.clear()
+            self.media_inputs.clear()
             self.store.clear_history()
             self.capture.reset_history()
             self.current_id = self.live_id = None
+            self.follow_live = True
             self.timer.stop()
             self.pending = None
             result = {'success': True}
@@ -185,6 +718,7 @@ class Controller(QObject):
                                  'sender': '我' if mine else '对方', 'timestamp': time.time(), 'source': 'manual'})
             self.sessions[ident] = {'id': ident, 'title': title, 'messages': messages, 'source': 'manual', 'updated': time.time()}
             self.current_id = ident
+            self.follow_live = False
             result = {'success': True, 'session_id': ident}
         elif method == 'set_compact':
             self.windowAction.emit('compact', bool(params.get('enabled')))
@@ -199,6 +733,110 @@ class Controller(QObject):
             raise ValueError('此操作暂不支持。')
         self.emit()
         return result
+
+    def _emit_import_done(self, future):
+        if self.closed or future.cancelled():
+            return
+        try:
+            self.importFinished.emit(future.result(), None)
+        except Exception as exc:
+            self.importFinished.emit(None, self.safe_error(exc))
+
+    def _on_import_finished(self, result, error):
+        if self.closed:
+            return
+        self.catalog['progress'] = None
+        if result and result.get('success'):
+            self.catalog['imported'] = self.imports.count()
+            self.catalog['available'] = True
+            self.catalog['scope'] = 'imported_archive'
+            self._sync_hub()
+        self.emit()
+
+    def _emit_session_done(self, sid, kind, future):
+        if self.closed or future.cancelled():
+            return
+        try:
+            self.sessionLoaded.emit(sid, {'kind': kind, 'result': future.result()}, None)
+        except Exception as exc:
+            self.sessionLoaded.emit(sid, None, self.safe_error(exc))
+
+    def _on_session_loaded(self, sid, payload, error):
+        if self.closed or error or not payload:
+            return
+        result = payload['result']
+        if payload['kind'] == 'select':
+            session = result['session']
+            self.sessions[sid] = session
+            self.current_id = sid
+            self.follow_live = False
+            if self.results.get(sid) and self.result_fingerprints.get(sid) != self.fingerprint(session):
+                self.results.pop(sid, None)
+                self.result_fingerprints.pop(sid, None)
+        else:
+            session = self.sessions.get(sid)
+            if session:
+                combined = {m['id']: m for m in [*result.get('items', []), *session.get('messages', [])] if m.get('id')}
+                # Pages are requested explicitly. Never silently discard an older
+                # page while the user is traversing a large archive.
+                session['messages'] = sorted(combined.values(), key=lambda m: (m.get('timestamp') or 0, m['id']))
+                session['next_cursor'] = result.get('next_cursor')
+                session['has_more'] = bool(result.get('has_more'))
+        self._sync_hub()
+        self.emit()
+
+    def _emit_media_done(self, sid, mid, future):
+        if self.closed or future.cancelled():
+            return
+        try:
+            self.mediaFinished.emit(sid, mid, future.result(), None)
+        except Exception as exc:
+            self.mediaFinished.emit(sid, mid, None, self.safe_error(exc))
+
+    def _on_media_finished(self, sid, mid, result, error):
+        if self.closed or error or not result or not result.get('success'):
+            return
+        session = self.sessions.get(sid)
+        if not session:
+            return
+        for message in session.get('messages', []):
+            if message.get('id') != mid:
+                continue
+            if result.get('kind') == 'voice' and result.get('transcript'):
+                message['transcript'] = result['transcript']
+                message['text'] = '[语音转写] ' + result['transcript']
+            elif result.get('kind') == 'image' and result.get('description'):
+                message['image_description'] = result['description']
+                message['text'] = '[图片识别] ' + result['description']
+            break
+        else:
+            return
+        if self.store.config['auto_analyze'] and sid == self.live_id and session['messages'][-1]['id'] == mid:
+            self.pending = sid
+            self.pending_manual = True
+            self.timer.start(400)
+        self._sync_hub()
+        self.emit()
+
+    def _on_data(self, kind, data):
+        if self.closed:
+            return
+        if kind == 'sessions_updated':
+            items = data.get('items') or []
+            self._remember_catalog(items)
+            indexed = {entry['id']: entry for entry in self.catalog['preview_updates']}
+            for item in items:
+                indexed[item['id']] = item
+            self.catalog['preview_updates'] = list(indexed.values())[-100:]
+            self.catalog['source'] = data.get('source') or self.catalog['source']
+        elif kind == 'catalog_meta':
+            self.catalog.update({name: value for name, value in data.items() if value is not None})
+            self.catalog['imported'] = self.imports.count()
+        elif kind == 'import_progress':
+            self.catalog['progress'] = data
+        elif kind == 'moments_meta':
+            self.moments.update(data)
+        self.emit()
 
     def _on_capture(self, kind, data):
         if self.closed:
@@ -224,8 +862,9 @@ class Controller(QObject):
             if is_live:
                 previous = self.live_id
                 self.live_id = ident
-                # Follow actual foreground chat changes; browsing history stays put between messages.
-                if self.current_id is None or self.current_id == previous or kind == 'session':
+                # A deliberate archive selection stays put when the visible
+                # WeChat window changes in the background.
+                if self.current_id is None or self.follow_live:
                     self.current_id = ident
             session = self.sessions.setdefault(ident, {'id': ident, 'title': data.get('title', '当前会话'),
                                                        'source': data.get('source', 'ocr'), 'messages': [], 'updated': time.time()})
@@ -253,7 +892,9 @@ class Controller(QObject):
                 if data.get('source') == 'weflow':
                     session['messages'].sort(key=lambda m: m.get('timestamp') or 0)
                 session['updated'] = time.time()
-                self.store.save_history(list(self.sessions.values()))
+                # Imported archives already live in their own local index. Avoid
+                # copying them into the optional transient history JSON as well.
+                self.store.save_history([s for s in self.sessions.values() if s.get('source') != 'import'])
                 cfg = self.store.full_config()
                 if added and added[-1].get('side') == 'me' and self.pending == ident and not self.pending_manual:
                     self.pending = None
@@ -264,6 +905,7 @@ class Controller(QObject):
                     self.pending_manual = False
                     self.timer.start(cfg['debounce_ms'])
             self.status.update(capture='live', connected=True, last_error='')
+            self._sync_hub()
         self.emit()
 
     def _run_pending(self):
@@ -332,11 +974,11 @@ class Controller(QObject):
             self.timer.start(400)
 
     def safe_error(self, exc):
-        message = str(exc)[:1200] or '操作未完成，请稍后重试。'
+        message = str(exc) or '操作未完成，请稍后重试。'
         for value in self.store.secrets.values():
             if value:
                 message = message.replace(value, '[已隐藏]')
-        return message
+        return message[:1200]
 
     def close(self):
         if self.closed:
@@ -346,5 +988,6 @@ class Controller(QObject):
         try:
             self.capture.stop(wait=False)
         finally:
+            self.hub.close(wait=False)
             self.models.close()
             self.pool.close()

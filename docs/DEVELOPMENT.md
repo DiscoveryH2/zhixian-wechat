@@ -86,7 +86,7 @@ Jev 请求使用 `state` 与 `questions`，响应需包含有效的 typed `answe
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/build.ps1
-.\.venv\Scripts\python.exe scripts/package_portable.py --input outputs/build/Zhixian --output outputs/Zhixian-1.1.0-Windows.zip
+.\.venv\Scripts\python.exe scripts/package_portable.py --input outputs/build/Zhixian --output outputs/Zhixian-1.2.0-Windows.zip
 ```
 
 构建脚本先运行测试，再使用 PyInstaller 生成 `outputs/build/Zhixian/`，收集上游和运行组件的许可文件。打包脚本从该目录生成便携 ZIP，排除应用个人数据文件。构建目标如果已有用户数据，脚本会拒绝覆盖；可通过 `-OutputDirectory` 选择新的构建目录。

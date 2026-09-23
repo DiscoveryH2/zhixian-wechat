@@ -43,6 +43,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Source privacy scan failed.' }
           ./.venv/Scripts/python.exe -m compileall -q src
           node --check ui/app.js
+          node --check ui/experience.js
       - name: Test pull requests
         if: github.event_name == 'pull_request'
         shell: pwsh
@@ -80,6 +81,10 @@ jobs:
             const version = match[1];
             const tag = `v${version}`;
             const { owner, repo } = context.repo;
+            const notesFile = path.join('docs', 'releases', `${version}.md`);
+            const releaseBody = fs.existsSync(notesFile)
+              ? fs.readFileSync(notesFile, 'utf8')
+              : 'Windows 便携版：完整解压后运行 Zhixian.exe。\n\n发行包不包含个人配置、聊天记录或 API 密钥。';
             const names = [`Zhixian-${version}-Windows.zip`, 'SHA256SUMS'];
             for (const name of names) {
               if (!fs.existsSync(path.join('outputs', name))) throw new Error(`Missing verified release asset: ${name}`);
@@ -96,7 +101,7 @@ jobs:
               release = (await github.rest.repos.createRelease({
                 owner, repo, tag_name: tag, target_commitish: context.sha, draft: true,
                 name: `知弦 PC ${tag}`,
-                body: 'Windows 便携版：完整解压后运行 Zhixian.exe。\n\n包含离线中文 OCR 与界面字体；首次使用填写 API Key、Base URL、Model name。\n\n由干净的公开源码构建，经过源码防泄漏检查、测试和打包诊断。发行包不包含个人配置、聊天记录或 API 密钥。请保留目录中的许可文件。'
+                body: releaseBody
               })).data;
             }
             const existing = (await github.rest.repos.listReleaseAssets({ owner, repo, release_id: release.id })).data;
@@ -110,5 +115,6 @@ jobs:
                 name, data, headers: { 'content-type': name.endsWith('.zip') ? 'application/zip' : 'text/plain', 'content-length': data.length },
                 request: { timeout: 600000 } });
             }
-            await github.rest.repos.updateRelease({ owner, repo, release_id: release.id, target_commitish: context.sha, draft: false });
+            await github.rest.repos.updateRelease({ owner, repo, release_id: release.id,
+              target_commitish: context.sha, body: releaseBody, draft: false });
             core.info(release.html_url);

@@ -1,9 +1,13 @@
 import json
+import io
+import logging
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from contextlib import redirect_stdout, redirect_stderr
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from desk.store import Store
@@ -65,6 +69,64 @@ class StoreTests(unittest.TestCase):
             with self.assertRaises(Exception):
                 self.store.save_config({'base_url': url})
         self.assertFalse((Path(self.temp.name) / 'config.json').exists())
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows DPAPI')
+    def test_media_credentials_dpapi_roundtrip_keep_and_independent_clear(self):
+        values = {name: 'synthetic-media-' + name + '-never-issued'
+                  for name in ('vision_api_key', 'stt_api_key')}
+        public = self.store.save_config(values)
+        for name, value in values.items():
+            self.assertNotIn(name, public)
+            self.assertTrue(public['has_' + name])
+            self.assertEqual(Store(Path(self.temp.name)).secrets[name], value)
+            for path in Path(self.temp.name).glob('*'):
+                self.assertNotIn(value.encode(), path.read_bytes())
+        self.store.save_config({'vision_api_key': '', 'stt_api_key': ''})
+        self.assertEqual(self.store.secrets['vision_api_key'], values['vision_api_key'])
+        self.assertEqual(self.store.secrets['stt_api_key'], values['stt_api_key'])
+        self.store.save_config({'clear_vision_api_key': True})
+        restored = Store(Path(self.temp.name))
+        self.assertEqual(restored.secrets['vision_api_key'], '')
+        self.assertEqual(restored.secrets['stt_api_key'], values['stt_api_key'])
+        self.assertFalse(restored.public_config()['has_vision_api_key'])
+        self.assertTrue(restored.public_config()['has_stt_api_key'])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows DPAPI')
+    def test_media_settings_never_log_credentials_or_return_them(self):
+        values = {name: 'synthetic-no-log-' + name + '-never-issued'
+                  for name in ('vision_api_key', 'stt_api_key')}
+        stdout, stderr, logs = io.StringIO(), io.StringIO(), io.StringIO()
+        handler = logging.StreamHandler(logs)
+        logging.getLogger().addHandler(handler)
+        try:
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                result = self.store.save_config({**values, 'vision_base_url': 'https://vision.example.invalid/v1',
+                                                 'stt_base_url': 'https://speech.example.invalid/v1'})
+                restored = Store(Path(self.temp.name))
+            exposed = stdout.getvalue() + stderr.getvalue() + logs.getvalue() + json.dumps(result) + restored.error
+            for value in values.values():
+                self.assertNotIn(value, exposed)
+        finally:
+            logging.getLogger().removeHandler(handler)
+
+    def test_media_credential_urls_rejected_without_creating_state(self):
+        for field in ('vision_base_url', 'stt_base_url'):
+            for bad in ('https://user:' + 'synthetic-password@media.example.invalid/v1',
+                        'https://media.example.invalid/v1?' + 'token=synthetic-query-credential'):
+                with self.subTest(field=field), self.assertRaises(Exception) as error:
+                    self.store.save_config({field: bad})
+                self.assertNotIn('synthetic-password', str(error.exception))
+                self.assertNotIn('synthetic-query-credential', str(error.exception))
+        self.assertEqual(list(Path(self.temp.name).iterdir()), [])
+
+    def test_dpapi_failure_never_falls_back_to_plaintext_media_keys(self):
+        sample = 'synthetic-encryption-failure-never-issued'
+        with patch('desk.store._crypt', side_effect=RuntimeError('Synthetic encryption failure')):
+            with self.assertRaises(RuntimeError):
+                self.store.save_config({'vision_api_key': sample, 'stt_api_key': sample})
+        self.assertEqual(list(Path(self.temp.name).iterdir()), [])
+        self.assertFalse(self.store.public_config()['has_vision_api_key'])
+        self.assertFalse(self.store.public_config()['has_stt_api_key'])
 
 
 if __name__ == '__main__':

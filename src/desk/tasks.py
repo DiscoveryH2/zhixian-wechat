@@ -7,12 +7,26 @@ from concurrent.futures import Future
 def _model_job(pipe, kind, payload):
     try:
         from core.engine import analyze, test_connection
-        result = test_connection(payload) if kind == 'test_connection' else analyze(**payload)
+        if kind == 'test_connection':
+            result = test_connection(payload)
+        elif kind == 'analyze':
+            result = analyze(**payload)
+        elif kind == 'analyze_image':
+            from core.media import analyze_image
+            result = analyze_image(**payload)
+        elif kind == 'transcribe_audio':
+            from core.media import transcribe_audio
+            result = transcribe_audio(**payload)
+        elif kind == 'analyze_moment':
+            from core.moments import analyze_post
+            result = analyze_post(**payload)
+        else:
+            raise ValueError('未识别的模型任务。')
         pipe.send((True, result))
     except Exception as exc:
         config = payload if kind == 'test_connection' else payload.get('config', {})
         error = str(exc)[:1200] or '模型任务未完成。'
-        for name in ('api_key', 'reply_api_key', 'weflow_token'):
+        for name in ('api_key', 'reply_api_key', 'weflow_token', 'vision_api_key', 'stt_api_key'):
             value = config.get(name)
             if value:
                 error = error.replace(value, '[已隐藏]')
@@ -78,7 +92,7 @@ class ModelTasks:
 class HelperTasks:
     def __init__(self):
         self.closed = False
-        self.slots = threading.BoundedSemaphore(3)
+        self.slots = threading.BoundedSemaphore(6)
 
     def submit(self, fn, *args):
         if self.closed or not self.slots.acquire(blocking=False):

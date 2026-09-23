@@ -36,6 +36,11 @@
     chevron: '<path d="m7 10 5 5 5-5"/>',
     spark: '<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z"/>',
     link: '<path d="m9 15 6-6M8 7l2-2a5 5 0 0 1 7 7l-2 2M16 17l-2 2a5 5 0 0 1-7-7l2-2"/>',
+    moments: '<circle cx="12" cy="12" r="8"/><path d="m12 4 3 8-3 8m8-8-8 3-8-3m2.3-5.7 5.7 3.2 5.7-3.2m0 11.4L12 14.5l-5.7 3.2"/>',
+    image: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1.5"/><path d="m3 17 5-5 4 4 4-6 5 7"/>',
+    voice: '<rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M9 22h6"/>',
+    palette: '<path d="M12 3a9 9 0 1 0 0 18h1a2 2 0 0 0 0-4 2 2 0 0 1 0-4h4a4 4 0 0 0 4-4c0-3-4-6-9-6Z"/><path d="M7 9h.1M10 6h.1M15 6h.1M5.5 13h.1"/>',
+    heart: '<path d="M12 20 4.5 12.5A5 5 0 0 1 12 6a5 5 0 0 1 7.5 6.5L12 20Z"/>',
   };
   function icon(name, size = 18) {
     const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -46,14 +51,15 @@
   const demo = new URLSearchParams(location.search).get('demo') === '1';
   const pending = new Map();
   let bridge = null, counter = 0, page = 'workspace', compact = window.innerWidth <= 640, online = false, search = '', currentState;
-  let renderQueued = false;
-  const blank = () => ({ config: { base_url: '', model_name: '', has_api_key: false, reply_model: '', reply_base_url: '', has_reply_api_key: false, relationship: '朋友', style: '自然简洁', auto_analyze: true, context_limit: 30, save_history: false, always_on_top: false, source: 'ocr', weflow_url: 'http://127.0.0.1:5031', weflow_has_token: false, debounce_ms: 1800 }, status: { capture: 'idle', analysis: 'idle', detail: '等待开始读取微信', last_error: '', source: 'ocr', connected: false }, sessions: [], current_session: null, analysis: null, notes: [], contacts: [], version: '1.1.0' });
+  let renderQueued = false, experience = null, lastWorkspaceKey = null;
+  const blank = () => ({ config: { base_url: '', model_name: '', has_api_key: false, reply_model: '', reply_base_url: '', has_reply_api_key: false, relationship: '朋友', style: '自然简洁', auto_analyze: true, context_limit: 30, save_history: false, always_on_top: false, source: 'ocr', weflow_url: 'http://127.0.0.1:5031', weflow_has_token: false, debounce_ms: 1800 }, status: { capture: 'idle', analysis: 'idle', detail: '等待开始读取微信', last_error: '', source: 'ocr', connected: false }, sessions: [], current_session: null, analysis: null, notes: [], contacts: [], version: '1.2.0' });
   currentState = blank();
   const configured = () => currentState.config.has_api_key && currentState.config.base_url && currentState.config.model_name;
   const live = () => ['live', 'searching'].includes(currentState.status.capture);
   const available = () => online || demo;
   function setState(snapshot) {
     if (!snapshot || typeof snapshot !== 'object') return;
+    if (experience?.reconcileSnapshot) snapshot = experience.reconcileSnapshot(snapshot);
     currentState = { ...currentState, ...snapshot, config: { ...currentState.config, ...(snapshot.config || {}) }, status: { ...currentState.status, ...(snapshot.status || {}) } };
     for (const k of ['sessions', 'notes', 'contacts']) if (!Array.isArray(currentState[k])) currentState[k] = [];
     if (!renderQueued) { renderQueued = true; requestAnimationFrame(() => { renderQueued = false; render(); }); }
@@ -63,7 +69,7 @@
     if (!bridge) return Promise.reject(new Error('请通过「启动知弦」桌面入口打开，浏览器预览无法连接微信。'));
     return new Promise((resolve, reject) => {
       const id = String(++counter);
-      const timeout = setTimeout(() => { pending.delete(id); reject(new Error('操作等待超时，请检查模型连接或微信窗口后重试。')); }, ['analyze', 'test_connection'].includes(method) ? 180000 : 45000);
+      const timeout = setTimeout(() => { pending.delete(id); reject(new Error('操作等待超时，请检查模型连接或微信窗口后重试。')); }, method === 'import_chat_records' ? 600000 : ['analyze', 'test_connection', 'analyze_moment', 'transcribe_voice', 'analyze_image', 'choose_media'].includes(method) ? 180000 : 45000);
       pending.set(id, { resolve, reject, timeout });
       try { bridge.request(JSON.stringify({ id, method, params })); } catch (err) { clearTimeout(timeout); pending.delete(id); reject(err); }
     });
@@ -71,8 +77,11 @@
   async function sync() { const snapshot = await rpc('bootstrap'); if (snapshot) setState(snapshot); return snapshot; }
   function errorText(error) { return error && error.message ? error.message : String(error || '操作未完成，请重试。'); }
   function toast(message, level = 'info') {
+    const host = $('#toasts');
+    for (const existing of host.querySelectorAll('.toast')) if (existing.textContent === String(message)) existing.remove();
+    while (host.children.length >= 3) host.firstElementChild.remove();
     const item = append(el('div', `toast${level === 'error' ? ' error' : ''}`), icon(level === 'error' ? 'info' : 'check', 16), el('span', '', message));
-    $('#toasts').append(item);
+    host.append(item);
     setTimeout(() => item.remove(), level === 'error' ? 7000 : 4000);
   }
   function button(text, name, handler, cls = '', disabled = false) {
@@ -112,12 +121,13 @@
   async function toggleCompact() { const enabled = !compact; await rpc('set_compact', { enabled }); compact = enabled; $('#app').classList.toggle('compact', compact); render(true); }
   function renderNavigation() {
     const nav = $('#navigation'); nav.replaceChildren();
-    for (const [id, label, name] of [['workspace', '工作台', 'chat'], ['knowledge', '知识库', 'book'], ['contacts', '联系人', 'people'], ['settings', '设置', 'settings']]) {
+    for (const [id, label, name] of [['workspace', '工作台', 'chat'], ['moments', '朋友圈', 'moments'], ['knowledge', '知识库', 'book'], ['contacts', '联系人', 'people'], ['appearance', '外观', 'palette'], ['settings', '设置', 'settings']]) {
       const b = el('button', `nav-button${page === id ? ' active' : ''}`); b.type = 'button'; b.setAttribute('aria-label', label); b.setAttribute('aria-current', page === id ? 'page' : 'false'); b.title = label;
       append(b, icon(name, 21), el('span', '', label)); b.addEventListener('click', () => go(id)); nav.append(b);
     }
   }
   function renderChrome() {
+    experience?.updateState(currentState);
     const status = currentState.status;
     const chip = $('#global-status');
     const labels = { idle: '尚未开始', searching: '寻找微信窗口', live: '正在观察', paused: '已暂停', error: '读取异常' };
@@ -125,13 +135,16 @@
     chip.className = `status-chip ${status.analysis === 'running' ? 'running' : status.capture === 'live' ? 'live' : status.capture === 'error' ? 'error' : ''}`;
     $('#footer-status').textContent = status.detail || '本地工作台已就绪';
     $('#footer-meta').textContent = currentState.config.model_name ? `${currentState.config.model_name} · ${sourceLabel(currentState.config.source)}` : 'Jev · 语境与判断';
-    $('#version').textContent = String(currentState.version || '1.1.0');
+    $('#version').textContent = String(currentState.version || '1.2.0');
     $('#demo-label').hidden = !demo;
     $('#mini-expand').hidden = !compact;
     renderNavigation();
   }
   function render(force = false) {
     renderChrome();
+    const workspaceKey = page === 'workspace' ? JSON.stringify({ compact, configured: Boolean(configured()), source: currentState.config.source, session: currentState.current_session, analysis: currentState.analysis, capture: currentState.status.capture, analyzing: currentState.status.analysis, error: currentState.status.last_error }) : null;
+    // Catalog warming/import progress must not rebuild chat bubbles or interrupt audio.
+    if (page === 'workspace' && !force && workspaceKey === lastWorkspaceKey) return;
     if (page === 'settings' && !force && $('#config-form')) return;
     if ((page === 'knowledge' || page === 'contacts') && !force && document.activeElement?.id === 'collection-search') return;
     const main = $('#main'); const oldScroll = main.scrollTop;
@@ -140,14 +153,17 @@
     const judgmentOpen = $('.judgment-details')?.open || false;
     if (page === 'workspace') main.replaceChildren(configured() ? workspace() : onboarding());
     else if (page === 'settings') main.replaceChildren(settings());
+    else if (page === 'appearance') main.replaceChildren(experience.renderAppearance());
+    else if (page === 'moments') main.replaceChildren(experience.renderMoments());
     else main.replaceChildren(collection(page));
+    if (page === 'workspace') lastWorkspaceKey = workspaceKey;
     main.scrollTop = oldScroll;
     const nextTimeline = $('.timeline');
     if (nextTimeline) nextTimeline.scrollTop = !oldTimeline || oldTimeline.end || nextTimeline.dataset.session !== oldTimeline.session ? nextTimeline.scrollHeight : oldTimeline.top;
     const nextJudgment = $('.judgment-details'); if (nextJudgment) nextJudgment.open = judgmentOpen;
     const nextAssist = $('.assistant-panel'); if (nextAssist) nextAssist.scrollTop = assistScroll;
   }
-  function sourceLabel(source) { return source === 'weflow' ? 'WeFlow 本地接口' : source === 'manual' ? '手动提供的对话' : '微信窗口 · 本地 OCR'; }
+  function sourceLabel(source) { return source === 'weflow' ? 'WeFlow 本地接口' : source === 'manual' ? '手动提供的对话' : source === 'import' ? '已导入的聊天记录' : source === 'demo' ? '合成演示数据' : '微信窗口 · 本地 OCR'; }
   function workspace() {
     const s = currentState, current = s.current_session, busy = s.status.analysis === 'running';
     const root = el('section', 'page workspace');
@@ -161,23 +177,20 @@
     const grid = el('div', 'workspace-grid');
     const chat = el('section', 'panel chat-panel'); chat.setAttribute('aria-label', '当前对话');
     const identity = append(el('div', 'session-identity'), el('div', 'avatar', current?.title?.slice(0, 1) || '弦'), append(el('div'), el('div', `session-name${!current ? ' session-empty-title' : ''}`, current?.title || '尚未选择会话'), append(el('div', 'session-caption'), el('span', live() && current ? 'live-label' : '', current ? `${current.messages?.length || 0} 条上下文` : '在微信中打开一段聊天'))));
-    const sessionSelect = el('select', 'session-select'); sessionSelect.setAttribute('aria-label', '切换已读取会话');
-    if (!s.sessions.length) { sessionSelect.append(new Option('最近会话', '')); sessionSelect.disabled = true; }
-    else for (const session of s.sessions) sessionSelect.append(new Option(session.title || '未命名会话', session.id, false, session.id === current?.id));
-    sessionSelect.addEventListener('change', () => action('select_session', { session_id: sessionSelect.value }).catch(err => toast(errorText(err), 'error')));
+    const sessionSelect = button('切换会话', 'search', () => experience.openCatalog(), 'small', !available());
     chat.append(append(el('div', 'panel-top'), identity, append(el('div', 'session-picker'), sessionSelect)));
     chat.append(append(el('div', 'source-strip'), icon('window', 13), el('span', '', sourceLabel(current?.source || s.config.source)), el('span', '', '·'), el('span', '', current?.active ? '当前可见会话' : current ? '历史上下文' : '仅观察当前可见窗口')));
     const timeline = el('div', 'timeline'); timeline.dataset.session = current?.id || ''; timeline.setAttribute('role', 'log'); timeline.setAttribute('aria-label', '聊天记录');
     if (current?.messages?.length) {
-      timeline.append(el('div', 'time-divider', '已读取的对话上下文'));
+      timeline.append(experience.historyControl(current), el('div', 'time-divider', '已读取的对话上下文'));
       for (const [idx, message] of current.messages.entries()) {
         const m = el('article', `message ${message.side === 'me' ? 'me' : 'other'}${idx === current.messages.length - 1 ? ' message-latest' : ''}`);
-        append(m, append(el('div', 'message-meta'), el('span', 'sender', message.side === 'me' ? '我' : message.sender || current.title), el('time', '', formatTime(message.timestamp))), el('div', 'message-bubble', message.text || ''));
+        append(m, append(el('div', 'message-meta'), el('span', 'sender', message.side === 'me' ? '我' : message.sender || current.title), el('time', '', formatTime(message.timestamp))), experience.messageContent(message, current));
         timeline.append(m);
       }
     } else timeline.append(empty(live() ? '正在寻找你的对话' : '从一段对话开始', live() ? '请保持微信聊天窗口可见。知弦会在这里整理识别到的消息。' : '打开电脑微信并选择会话，然后开始观察。也可以手动补充一段对话。', 'chat', !live() ? button('开始观察微信', 'play', toggleCapture, 'primary small', !available()) : null));
     chat.append(timeline);
-    chat.append(append(el('div', 'chat-bottom'), append(el('div', 'capture-hint'), icon('eye', 13), el('span', '', live() ? '持续读取可见消息' : '开始观察后读取可见消息')), button('读取一次', 'refresh', () => action('one_shot'), 'small ghost', !available())));
+    chat.append(append(el('div', 'chat-bottom'), append(el('div', 'capture-hint'), icon('eye', 13), el('span', '', live() ? '持续读取可见消息' : '观察已暂停')), append(el('div', 'chat-tools'), iconButton('选择本机图片并分析', 'image', () => experience.chooseMedia(current, 'image')), iconButton('选择本机音频并转写', 'voice', () => experience.chooseMedia(current, 'voice')), button('读取一次', 'refresh', () => action('one_shot'), 'small ghost', !available()))));
     const assistant = el('section', 'assistant-panel'); assistant.setAttribute('aria-label', 'Jev 分析与回复');
     const analysis = s.analysis?.session_id === current?.id ? s.analysis : null;
     assistant.append(analysisPanel(analysis, busy));
@@ -380,6 +393,7 @@
   }
   function showDialog(title) {
     const dialog = $('#editor'); if (dialog.open) dialog.close(); dialog.replaceChildren();
+    dialog.className = 'dialog';
     dialog.append(append(el('div', 'dialog-head'), el('h2', '', title), iconButton('关闭', 'close', () => dialog.close())));
     const body = el('div', 'dialog-body'); dialog.append(body); dialog.showModal(); return { dialog, body };
   }
@@ -425,7 +439,7 @@
     }); input.click();
   }
 
-  let demoSnapshot;
+  let demoSnapshot, demoSessions = new Map();
   function initializeDemo() {
     demoSnapshot = blank(); demoSnapshot.config = { ...demoSnapshot.config, has_api_key: true, base_url: 'https://demo.example.invalid/v1', model_name: 'jev-demo', auto_analyze: true };
     const now = new Date();
@@ -437,11 +451,23 @@
       ['other', '林以宁', '如果今晚能一起过一下就更好了，十几分钟应该就够。', -1],
     ].map(([side, sender, text, offset], i) => ({ id: `demo-message-${i}`, side, sender, text, timestamp: new Date(now.getTime() + offset * 60000).toISOString(), source: 'ocr' }));
     demoSnapshot.current_session = { id: 'demo-session-1', title: '林以宁', messages, source: 'ocr', active: true };
+    messages.splice(2, 0, { id: 'demo-image', side: 'other', sender: '林以宁', kind: 'image', text: '[图片]', media_url: 'demo-scene.svg', timestamp: new Date(now.getTime() - 10 * 60000).toISOString(), source: 'demo' });
+    messages.splice(4, 0, { id: 'demo-voice', side: 'other', sender: '林以宁', kind: 'voice', text: '[语音]', duration: 12, timestamp: new Date(now.getTime() - 7 * 60000).toISOString(), source: 'demo' });
     demoSnapshot.sessions = [{ id: 'demo-session-1', title: '林以宁', count: messages.length, preview: messages.at(-1).text, updated: now.toISOString(), source: 'ocr' }];
     demoSnapshot.status = { capture: 'live', analysis: 'idle', detail: '演示模式 · 所有对话与分析均为合成数据', last_error: '', source: 'ocr', connected: false };
     demoSnapshot.analysis = demoAnalysis('demo-session-1');
     demoSnapshot.notes = [{ id: 'demo-note-1', title: '品牌提案 · 本周背景', content: '客户更重视具体业务场景。第一轮提案聚焦用户洞察和可执行的路径，避免过多概念表达。', tags: ['工作', '提案'], always: false }];
     demoSnapshot.contacts = [{ id: 'demo-contact-1', name: '林以宁', aliases: ['以宁'], relationship: '项目同事', notes: '负责客户沟通，喜欢先确认方向再讨论细节。' }];
+    demoSnapshot.appearance = { theme: 'night', font_scale: 1, background_url: '' };
+    demoSnapshot.catalog = { available: true, source: 'demo', detail: '演示目录 · 合成会话' };
+    const names = ['周思远', '设计提案讨论组', '许知遥', '产品协作组', '陈序', '唐映宁', '周末徒步', '顾予安', '林悦', '研发小队', '程书', '许漫', '摄影同行', '沈禾', '江岚'];
+    names.forEach((name, i) => demoSnapshot.sessions.push({ id: `demo-more-${i}`, title: name, is_group: /组|队|同行|徒步/.test(name), preview: i % 3 === 0 ? '[图片]' : i % 3 === 1 ? '[语音] 18秒' : '好的，我们明天再确认一下。', kind: i % 3 === 0 ? 'image' : i % 3 === 1 ? 'voice' : 'text', updated: now.toISOString(), source: 'demo', count: 3 }));
+    demoSessions = new Map([[demoSnapshot.current_session.id, structuredClone(demoSnapshot.current_session)]]);
+    demoSnapshot.moments = { available: true, source: 'demo', items: [
+      { id: 'demo-moment-1', author: '林以宁', session_id: 'demo-session-1', text: '忙完这一阵，终于赶上了傍晚的光。偶尔慢一点，才会发现熟悉的路也很好看。', timestamp: now.toISOString(), images: ['demo-scene.svg'] },
+      { id: 'demo-moment-2', author: '周思远', session_id: 'demo-more-0', text: '第一场分享结束。紧张是真紧张，大家的反馈也是真的有用。下一场见。', timestamp: now.toISOString(), images: [] },
+      { id: 'demo-moment-3', author: '许知遥', session_id: 'demo-more-2', text: '周末的小目标：读完手边这本书，试一家新咖啡馆。', timestamp: now.toISOString(), images: [] },
+    ] };
   }
   function demoAnalysis(sessionId) {
     return { session_id: sessionId, intent: '对方想一起把方案说得更具体，也在确认你今晚是否方便。', need: '用真实场景支撑洞察，降低明天提案的不确定性。', action: '先接住建议，再给出明确的时间与准备动作。', should_reply: true, urgency: null, risk: 1, confidence: null, answers: { literal_question: { noul: .91 }, true_intent: { choice: 'request_action' }, danger_level: { score: 1 }, should_reply_now: { noul: .84 }, best_action: { choice: 'make_plan' }, she_needs: { choice: 'action' }, tension_resolved: { noul: .93 } }, candidates: [
@@ -453,6 +479,17 @@
   async function demoRequest(method, params) {
     if (!demoSnapshot) initializeDemo();
     if (method === 'bootstrap') return structuredClone(demoSnapshot);
+    if (method === 'import_chat_records') { await new Promise(r => setTimeout(r, 900)); return { success: true, sessions: 16, messages: 128, message: '演示导入完成：16 个合成会话、128 条合成消息。未读取本地文件。' }; }
+    if (method === 'list_sessions') { const all = demoSnapshot.sessions.filter(s => (!params.query || s.title.toLowerCase().includes(params.query.toLowerCase())) && (!params.source || params.source === 'all' || params.source === 'collected' ? true : params.source === s.source)); const start = Number(params.cursor || 0), limit = Number(params.limit || 12); return { items: structuredClone(all.slice(start, start + limit)), next_cursor: start + limit < all.length ? String(start + limit) : null, has_more: start + limit < all.length, total: all.length, available: true, source: 'demo' }; }
+    if (method === 'load_media') { const message = demoSnapshot.current_session?.messages.find(m => m.id === params.message_id); return message?.kind === 'image' ? { available: true, media_url: 'demo-scene.svg', kind: 'image' } : { available: false, message: '演示语音没有附带音频文件，仅提供合成转写用于展示。' }; }
+    if (method === 'choose_media') { if (!demoSnapshot.current_session) throw new Error('请先选择一个会话。'); const message = { id: `demo-${params.kind}-${Date.now()}`, side: 'other', sender: demoSnapshot.current_session.title, kind: params.kind, text: params.kind === 'image' ? '[图片]' : '[语音]', media_url: params.kind === 'image' ? 'demo-scene.svg' : undefined, duration: params.kind === 'voice' ? 8 : undefined, source: 'demo', timestamp: new Date().toISOString() }; demoSnapshot.current_session.messages.push(message); setState(structuredClone(demoSnapshot)); return { success: true, message: '已加入内置合成媒体，演示模式未读取本机文件。' }; }
+    if (method === 'load_session_messages') return { messages: [], has_more: false, next_cursor: null, available: true };
+    if (method === 'list_moments') { const all = demoSnapshot.moments.items.filter(m => !params.session_id || m.session_id === params.session_id); return { items: structuredClone(all), has_more: false, next_cursor: null, available: true, source: 'demo' }; }
+    if (method === 'analyze_moment') { await new Promise(r => setTimeout(r, 1000)); return { like: true, recommendation: '可以点赞，评论保持轻松。', reason: '这是一条分享近况的动态，简单认可比追问细节更合适。演示建议来自合成数据。', comments: ['这样的傍晚，值得好好停一停。', '忙完还能抓住一点小确幸，真好。'] }; }
+    if (method === 'manual_moment') { const item = { id: `demo-moment-${Date.now()}`, author: params.author, text: params.text, session_id: params.session_id, timestamp: new Date().toISOString(), source: 'manual', images: [] }; demoSnapshot.moments.items.unshift(item); return { item, moment_id: item.id }; }
+    if (method === 'set_appearance') { Object.assign(demoSnapshot.appearance, params); setState(structuredClone(demoSnapshot)); return { appearance: structuredClone(demoSnapshot.appearance) }; }
+    if (method === 'choose_background' || method === 'clear_background') { demoSnapshot.appearance.background_url = method === 'choose_background' ? 'demo-scene.svg' : ''; setState(structuredClone(demoSnapshot)); return { appearance: structuredClone(demoSnapshot.appearance) }; }
+    if (method === 'transcribe_voice' || method === 'analyze_image') { const m = demoSnapshot.current_session?.messages.find(m => m.id === params.message_id); if (!m) throw new Error('演示消息未找到。'); if (method === 'transcribe_voice') m.transcript = '我想说的是，今晚我们主要看看开头的案例，十几分钟就好。'; else m.image_description = '演示图片：青绿色山峦与落日，用来测试图片消息的展示和分析入口。'; setState(structuredClone(demoSnapshot)); return { transcript: m.transcript, description: m.image_description }; }
     if (method === 'test_connection') return { success: true, message: '演示连接已通过。这是模拟结果，未请求任何模型服务。', mode: 'demo', generation_available: true };
     if (method === 'save_config') { const c = { ...params.config }; for (const [secret, flag] of [['api_key', 'has_api_key'], ['reply_api_key', 'has_reply_api_key'], ['weflow_token', 'weflow_has_token']]) { if (c[secret]) c[flag] = true; delete c[secret]; } Object.assign(demoSnapshot.config, c); }
     else if (method === 'start_capture') { demoSnapshot.status.capture = 'live'; if (demoSnapshot.current_session?.source === 'ocr') demoSnapshot.current_session.active = true; }
@@ -474,9 +511,11 @@
       const id = `demo-session-${Date.now()}`;
       const messages = params.text.split('\n').filter(Boolean).map((line, i) => { const me = /^我[:：]/.test(line); return { id: `${id}-${i}`, side: me ? 'me' : 'other', sender: me ? '我' : params.title, text: line.replace(/^(我|对方)[:：]\s*/, ''), timestamp: new Date().toISOString(), source: 'manual' }; });
       demoSnapshot.current_session = { id, title: params.title, messages, source: 'manual', active: false }; demoSnapshot.sessions.push({ id, title: params.title, count: messages.length, source: 'manual' }); demoSnapshot.analysis = null;
+      demoSessions.set(id, structuredClone(demoSnapshot.current_session));
     } else if (method === 'select_session') {
-      if (params.session_id === 'demo-session-1') { const notes = demoSnapshot.notes, contacts = demoSnapshot.contacts, config = demoSnapshot.config; initializeDemo(); Object.assign(demoSnapshot, { notes, contacts, config }); }
-      else if (params.session_id !== demoSnapshot.current_session?.id) throw new Error('演示只保留当前手动会话；完整会话存储由桌面版提供。');
+      const item = demoSnapshot.sessions.find(s => s.id === params.session_id); if (!item) throw new Error('会话不存在。');
+      if (!demoSessions.has(item.id)) demoSessions.set(item.id, { ...item, active: false, messages: [{ id: `${item.id}-text`, side: 'other', sender: item.title, kind: item.kind || 'text', text: item.preview, timestamp: new Date().toISOString(), source: 'demo' }] });
+      demoSnapshot.current_session = structuredClone(demoSessions.get(item.id)); demoSnapshot.analysis = item.id === 'demo-session-1' ? demoAnalysis(item.id) : null;
     } else if (method === 'import_notes') demoSnapshot.notes.push({ id: `demo-note-${Date.now()}`, title: '导入的背景文本', content: params.text, tags: ['导入'], always: false });
     else if (method === 'refresh_sources') return { sources: ['演示微信窗口（合成数据）'] };
     else if (method === 'one_shot') { toast('演示模式：当前消息来自合成数据，未读取微信。'); }
@@ -516,5 +555,6 @@
     const next = window.innerWidth <= 640;
     if (next !== compact) { compact = next; $('#app').classList.toggle('compact', compact); render(); }
   });
+  experience = window.ZhixianExperience.mount({ $, el, append, icon, button, iconButton, notice, empty, heading, tag, rpc, action, sync, setState, getState: () => currentState, getPage: () => page, go, render, toast, errorText, formatTime, valueText, available, showDialog, manualDialog, field, demo });
   connect();
 })();
