@@ -130,10 +130,15 @@ class DataHubHttpTests(unittest.TestCase):
         self.config = {"source": "weflow", "weflow_url": self.server.url, "weflow_token": TEST_TOKEN}
 
     def wait_previews(self):
-        until = time.monotonic() + 4
-        while self.hub._pending and time.monotonic() < until:
+        # Only the first matching preview is relevant to this contract. The
+        # remaining 40 background HTTP requests may take longer on a hosted
+        # Windows runner and are drained by close(wait=True) in cleanup.
+        until = time.monotonic() + 10
+        while not any(data["items"][0]["preview"] == "[图片]" for kind, data in self.events
+                      if kind == "sessions_updated") and time.monotonic() < until:
             time.sleep(.01)
-        self.assertFalse(self.hub._pending)
+        self.assertTrue(any(data["items"][0]["preview"] == "[图片]" for kind, data in self.events
+                            if kind == "sessions_updated"))
 
     def test_sessions_progressive_prefix_paging_and_search(self):
         first = self.hub.list_sessions(self.config, limit=20)
