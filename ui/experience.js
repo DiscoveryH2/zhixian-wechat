@@ -4,7 +4,7 @@
 window.ZhixianExperience = Object.freeze({
   mount(api) {
     const { $, el, append, icon, button, iconButton, notice, empty, heading, tag, rpc, sync, setState, getState, getPage, go, render, toast, errorText, formatTime, valueText, available, showDialog, manualDialog, field, demo } = api;
-    const catalog = { items: [], query: '', filter: 'all', cursor: null, more: false, total: null, busy: false, available: false, source: '', serial: 0, onSelect: null };
+    const catalog = { items: [], query: '', filter: 'all', cursor: null, more: false, total: null, busy: false, available: false, source: '', serial: 0, onSelect: null, multi: false, selected: new Map() };
     const moments = { items: [], cursor: null, more: false, loaded: false, busy: false, available: false, source: '', detail: '', error: '', friend: null, results: new Map(), running: new Set(), serial: 0 };
     const histories = new Map(), momentMedia = new Map();
     let appearance = { theme: 'night', font_scale: 1, background_url: '' }, introTimer, searchTimer, importBusy = false;
@@ -99,10 +99,11 @@ window.ZhixianExperience = Object.freeze({
     }
     function displayName(item) { return String(item.title || item.name || item.display_name || item.remark || '未命名会话'); }
 
-    function openCatalog(onSelect = null) {
+    function openCatalog(onSelect = null, options = {}) {
       const dialog = $('#session-catalog');
       if (dialog.open) { $('#session-search')?.focus({ preventScroll: true }); return; }
       catalog.serial++; catalog.items = []; catalog.query = ''; catalog.filter = 'all'; catalog.cursor = null; catalog.more = false; catalog.onSelect = onSelect; catalog.busy = false;
+      catalog.multi = Boolean(options.multi); catalog.selected = new Map((options.selected || []).map(item => [String(item.session_id), { session_id: String(item.session_id), title: item.title, is_group: Boolean(item.is_group), type: item.type || (item.is_group ? 'group' : 'private') }]));
       dialog.replaceChildren();
       const input = el('input', 'input'); input.id = 'session-search'; input.type = 'search'; input.placeholder = '搜索好友、群聊或会话名称'; input.autocomplete = 'off'; input.setAttribute('aria-label', input.placeholder);
       input.addEventListener('input', () => { clearTimeout(searchTimer); catalog.query = input.value; catalog.serial++; catalog.busy = false; searchTimer = setTimeout(() => fetchCatalog(true), 220); });
@@ -112,10 +113,10 @@ window.ZhixianExperience = Object.freeze({
         filter.addEventListener('click', () => { catalog.filter = value; catalog.serial++; catalog.busy = false; filters.querySelectorAll('button').forEach(b => b.classList.toggle('active', b === filter)); fetchCatalog(true); }); filters.append(filter);
       }
       append(dialog,
-        append(el('div', 'catalog-heading'), append(el('div'), el('div', 'eyebrow', onSelect ? '选择联系人' : '你的对话空间'), el('h2', '', onSelect ? '选择好友' : '全局会话')), iconButton('关闭会话窗口', 'close', () => dialog.close())),
+        append(el('div', 'catalog-heading'), append(el('div'), el('div', 'eyebrow', catalog.multi ? '自动回复范围' : onSelect ? '选择联系人' : '你的对话空间'), el('h2', '', catalog.multi ? '选择允许自动回复的会话' : onSelect ? '选择好友' : '全局会话')), iconButton('关闭会话窗口', 'close', () => dialog.close())),
         append(el('div', 'catalog-search'), icon('search', 18), input),
         filters, el('div', 'catalog-source'), el('div', 'catalog-list'), el('div', 'catalog-pagination'),
-        append(el('div', 'catalog-footer'), el('span', 'catalog-import-status', importBusy ? '正在本机索引，可关闭此窗口继续使用' : '支持 CipherTalk / ChatLab 导出的 JSON、JSONL'), append(el('div', 'catalog-import-actions'), button('粘贴对话', 'pen', () => { dialog.close(); manualDialog(); }, 'small ghost'), importButton('files', '导入文件', 'upload'), importButton('folder', '导入目录', 'folder'))));
+        append(el('div', 'catalog-footer'), el('span', 'catalog-import-status', catalog.multi ? '只会列出已核验可实时接收的会话；归档记录不支持自动发送。' : importBusy ? '正在本机索引，可关闭此窗口继续使用' : '支持 CipherTalk / ChatLab 导出的 JSON、JSONL'), catalog.multi ? append(el('div', 'catalog-import-actions'), button('取消', null, () => dialog.close(), 'small subtle'), button('应用选择', 'check', async () => { await catalog.onSelect?.([...catalog.selected.values()]); dialog.close(); }, 'small primary')) : append(el('div', 'catalog-import-actions'), button('粘贴对话', 'pen', () => { dialog.close(); manualDialog(); }, 'small ghost'), importButton('files', '导入文件', 'upload'), importButton('folder', '导入目录', 'folder'))));
       dialog.showModal(); input.focus({ preventScroll: true }); fetchCatalog(true);
     }
     function importButton(mode, label, symbol) {
@@ -168,22 +169,132 @@ window.ZhixianExperience = Object.freeze({
       else if (!catalog.available && !catalog.busy) source.append(notice(catalog.detail || '当前仅覆盖已读取的可见聊天。连接支持目录的 WeFlow，或导入 CipherTalk / ChatLab 导出的文件或目录；此页面不会自动读取微信数据库。', 'info'));
       else { if (catalog.detail && !catalog.busy) source.append(notice(catalog.detail, 'info')); source.append(append(el('div', 'catalog-meta'), el('span', '', catalog.source === 'demo' ? '合成演示会话' : catalog.source === 'weflow' ? 'WeFlow 会话目录' : '当前可用会话'), el('span', '', catalog.total === null ? `已加载 ${catalog.items.length} 个` : `${catalog.total} 个会话`))); }
       if (catalog.busy && !catalog.items.length) list.append(append(el('div', 'catalog-loading'), el('div', 'skeleton wide'), el('div', 'skeleton medium'), el('div', 'skeleton wide')));
-      else if (!catalog.items.length) list.append(empty(catalog.query ? '没有找到匹配的会话' : '还没有可用的会话', catalog.query ? '尝试换一个名字，或手动导入对话。' : '打开微信并读取一次，或在设置中连接会话数据源。', 'chat'));
       for (const item of catalog.items) {
+        if (catalog.multi && !item.auto_reply_eligible) continue;
         const group = Boolean(item.type === 'group' || item.is_group || String(item.id).endsWith('@chatroom'));
-        const row = el('button', `catalog-row${item.id === getState().current_session?.id ? ' selected' : ''}${item.preview_status === 'pending' ? ' preview-pending' : ''}`); row.type = 'button'; row.dataset.sessionId = String(item.id);
+        const chosen = catalog.selected.has(String(item.id));
+        const row = el('button', `catalog-row${chosen || item.id === getState().current_session?.id ? ' selected' : ''}${item.preview_status === 'pending' ? ' preview-pending' : ''}${catalog.multi ? ' catalog-multi-row' : ''}`); row.type = 'button'; row.dataset.sessionId = String(item.id); if (catalog.multi) row.setAttribute('aria-pressed', String(chosen));
         const name = displayName(item);
-        append(row, append(el('span', `catalog-avatar${group ? ' group-avatar' : ''}`), group ? icon('people', 19) : el('span', '', name.slice(0, 1))), append(el('span', 'catalog-copy'), append(el('span', 'catalog-title'), el('span', '', name), group ? tag('群聊') : null), el('span', 'catalog-preview', previewText(item))), append(el('span', 'catalog-trailing'), el('time', '', formatTime(item.updated || item.timestamp)), item.id === getState().current_session?.id ? icon('check', 14) : icon('arrow', 14)));
+        append(row, append(el('span', `catalog-avatar${group ? ' group-avatar' : ''}`), group ? icon('people', 19) : el('span', '', name.slice(0, 1))), append(el('span', 'catalog-copy'), append(el('span', 'catalog-title'), el('span', '', name), group ? tag('群聊') : null), el('span', 'catalog-preview', catalog.multi ? '微信实时会话 · 允许自动回复' : previewText(item))), append(el('span', 'catalog-trailing'), el('time', '', formatTime(item.updated || item.timestamp)), catalog.multi ? el('span', `catalog-choice${chosen ? ' chosen' : ''}`, chosen ? '已选择' : '选择') : item.id === getState().current_session?.id ? icon('check', 14) : icon('arrow', 14)));
         row.addEventListener('click', async () => {
           row.disabled = true; row.classList.add('selecting');
-          try { if (catalog.onSelect) await catalog.onSelect(item); else { await rpc('select_session', { session_id: item.id }); await sync(); go('workspace'); } dialog.close(); }
+          try { if (catalog.multi) { if (catalog.selected.has(String(item.id))) catalog.selected.delete(String(item.id)); else catalog.selected.set(String(item.id), { session_id: String(item.id), title: name, is_group: group, type: item.auto_reply_type_known ? (group ? 'group' : 'private') : '', auto_reply_type_known: Boolean(item.auto_reply_type_known) }); paintCatalog(); } else { if (catalog.onSelect) await catalog.onSelect(item); else { await rpc('select_session', { session_id: item.id }); await sync(); go('workspace'); } dialog.close(); } }
           catch (err) { toast(errorText(err), 'error'); row.disabled = false; row.classList.remove('selecting'); }
         }); list.append(row);
       }
+      if (!list.querySelector('.catalog-row') && !catalog.busy) list.append(empty(catalog.multi ? '没有已核验的实时会话' : catalog.query ? '没有找到匹配的会话' : '还没有可用的会话', catalog.multi ? '导入记录和未核验的会话不会出现在自动回复名单里。' : catalog.query ? '尝试换一个名字，或手动导入对话。' : '打开微信并读取一次，或在设置中连接会话数据源。', 'chat'));
       list.scrollTop = oldTop;
       const footer = $('.catalog-pagination', dialog); footer.replaceChildren();
       if (catalog.more) footer.append(button(catalog.busy ? '正在加载…' : '加载更多会话', 'chevron', () => fetchCatalog(false), 'small', catalog.busy));
       else if (catalog.items.length && !catalog.busy) footer.append(el('span', 'subtle-caption', catalog.available ? '已显示当前目录中的全部匹配会话' : '以上为当前已读取的会话'));
+    }
+
+    function autoReplyState() { return getState().auto_reply || {}; }
+    function autoReplyStatus(a) {
+      if (a.status === 'emergency') return ['已紧急停止', 'error'];
+      if (a.status === 'blocked') return ['等待微信连接', 'paused'];
+      if (a.status === 'error') return ['需要处理', 'error'];
+      if (a.enabled && !a.paused) return ['运行中', 'active'];
+      if (a.enabled && a.paused) return ['已暂停', 'paused'];
+      return ['已关闭', 'off'];
+    }
+    function autoReplyCount(value, fallback) { const number = Number(value); return Number.isFinite(number) && number > 0 ? number : fallback; }
+    function autoReplyReason(item) {
+      const reasons = { not_mentioned: '群聊中未明确 @ 我', unverified_session: '会话未通过实时核验', session_not_visible: '微信当前未显示此会话', cooldown: '处于同会话冷却时间', hourly_limit: '达到每小时发送限额', daily_limit: '达到每日发送限额', no_reply_needed: '判断无需回复', duplicate: '重复消息已忽略', unsupported_message: '暂不支持此类消息', send_failed: '微信未确认发送成功', signature_appended: '末尾附固定署名“（以上内容为知弦生成）”' };
+      return reasons[item.reason] || (item.reason ? String(item.reason).slice(0, 160) : item.status === 'failed' ? '发送未完成' : item.status === 'skipped' ? '根据安全规则跳过' : '');
+    }
+    function renderAutoReply() {
+      const a = autoReplyState(), [statusText, statusClass] = autoReplyStatus(a), root = el('section', 'page auto-reply-page');
+      root.append(heading('自动回复', '仅对明确加入名单的实时微信会话，代你回复新收到的消息。', '知弦 · 主动协助'));
+      const liveCard = el('section', `panel auto-reply-status ${statusClass}`);
+      const statusIcon = append(el('span', 'auto-reply-status-icon'), icon(a.enabled && !a.paused ? 'pulse' : a.paused ? 'pause' : 'lock', 19));
+      const statusCopy = append(el('div', 'auto-reply-status-copy'), el('span', 'auto-reply-kicker', '发送权限'), el('h2', '', statusText), el('p', '', a.detail || (a.enabled && !a.paused ? '知弦正在处理名单中的新消息。' : a.paused ? '自动回复已暂停，不会发送新回复。' : '自动回复默认关闭，每次启动都需要你明确确认。')));
+      const statusActions = el('div', 'auto-reply-status-actions');
+      if (a.enabled && !a.paused) statusActions.append(button('暂停自动回复', 'pause', () => action('pause_auto_reply', {}, '自动回复已暂停'), 'small subtle', !available()), button('紧急停止', 'close', () => emergencyStop(), 'small danger', !available()));
+      else if (a.enabled && a.paused) statusActions.append(button('恢复运行', 'play', () => confirmAutoReplyStart(), 'small primary', !available()), button('紧急停止', 'close', () => emergencyStop(), 'small danger', !available()));
+      else statusActions.append(button('启动自动回复', 'play', () => confirmAutoReplyStart(), 'small primary', !available() || !a.allowlist?.length));
+      liveCard.append(statusIcon, statusCopy, statusActions); root.append(liveCard);
+      root.append(notice('这项功能会通过微信真实发送消息。每条自动发送回复末尾都会附固定署名“（以上内容为知弦生成）”。当前 PC 自动发送只面向微信当前可见且可核验的聊天；导入的历史记录不能发送，也没有已验证的后台 WeFlow 发送 API。群聊默认仅回复明确 @ 我。OCR 没有可靠的 @ 标记，因此默认模式不会对 OCR 群聊自动发送；如要对 OCR 群聊发送，需显式选择“所有新消息”。', 'warn'));
+
+      const settings = el('section', 'panel auto-reply-settings');
+      settings.append(append(el('div', 'auto-reply-section-head'), append(el('div'), el('div', 'eyebrow', '范围与节奏'), el('h2', '', '你决定知弦可以回复谁')),
+        button(`管理名单 · ${a.allowlist?.length || 0}`, 'people', () => openCatalog(async selected => { const typed = await confirmAutoReplyTypes(selected); if (!typed) return; await rpc('configure_auto_reply', { allowlist: typed, ...autoReplyPolicy() }); await sync(); toast('自动回复名单已更新'); }, { multi: true, selected: a.allowlist || [] }), 'small subtle', !available())));
+      settings.append(el('p', 'field-hint auto-reply-explainer', '只从全局会话目录中选择已核验的实时会话。OCR 会话需保持在微信当前可见窗口；WeFlow 会话发送前也会再核验微信前台状态。'));
+      const allowlist = el('div', 'auto-reply-allowlist');
+      if (a.allowlist?.length) for (const item of a.allowlist) allowlist.append(append(el('div', 'auto-reply-person'), append(el('span', `auto-reply-avatar${item.is_group ? ' group' : ''}`), item.is_group ? icon('people', 15) : el('span', '', (item.title || '弦').slice(0, 1))), append(el('span', 'auto-reply-person-copy'), el('strong', '', item.title || item.session_id), el('span', '', item.is_group ? (a.group_mode === 'all' ? '群聊 · 回复所有新消息' : '群聊 · 仅回复明确 @ 我') : '联系人 · 回复新消息')), button('移除', 'close', async () => { await rpc('configure_auto_reply', { allowlist: a.allowlist.filter(entry => entry.session_id !== item.session_id), ...autoReplyPolicy() }); await sync(); }, 'small ghost')));
+      else allowlist.append(el('div', 'auto-reply-empty', '名单为空。知弦不会向任何会话发送消息。'));
+      settings.append(allowlist);
+
+      const form = el('form', 'auto-reply-policy');
+      const modeField = el('label', 'field auto-reply-group-mode'); modeField.append(el('span', 'field-label', '群聊回复范围'));
+      const select = el('select', 'input'); select.id = 'auto-reply-group-mode'; select.name = 'group_mode';
+      select.append(new Option('仅在确认明确 @ 我时回复（推荐）', 'mention_only'), new Option('回复群聊中的所有新消息', 'all')); select.value = a.group_mode === 'all' ? 'all' : 'mention_only';
+      const mentionHint = 'OCR 没有可靠的 @ 标记，因此默认模式不会对 OCR 群聊自动发送；如需发送，请显式选择“所有新消息”。';
+      const modeHint = el('span', 'field-hint', select.value === 'all' ? '你已明确选择回复群聊中的每条新消息。' : mentionHint);
+      select.addEventListener('change', () => { modeHint.textContent = select.value === 'all' ? '你已明确选择回复群聊中的每条新消息。' : mentionHint; });
+      modeField.append(select, modeHint);
+      const timing = el('div', 'form-two auto-reply-timing');
+      timing.append(autoReplyNumberField('合并等待（秒）', 'debounce_seconds', a.debounce_seconds, 2, 15, '等待对方连续发完消息。'), autoReplyNumberField('同会话冷却（秒）', 'cooldown_seconds', a.cooldown_seconds, 15, 3600, '避免短时间内重复发送。'));
+      const limits = el('div', 'form-two auto-reply-limits');
+      limits.append(autoReplyNumberField('每小时最多发送', 'hourly_limit', a.hourly_limit, 1, 30), autoReplyNumberField('每天最多发送', 'daily_limit', a.daily_limit, 1, 100));
+      form.append(modeField, timing, limits);
+      form.append(append(el('div', 'auto-reply-form-footer'), el('span', 'field-hint', '每次启动后都需要手动开启。限额按本机统计。'), button('保存规则', 'check', async () => { if (!form.reportValidity()) return; await rpc('configure_auto_reply', { allowlist: a.allowlist || [], ...autoReplyPolicy(form) }); await sync(); toast('自动回复规则已保存'); }, 'small')));
+      root.append(settings, form);
+
+      const recent = el('section', 'panel auto-reply-recent');
+      recent.append(append(el('div', 'auto-reply-section-head'), append(el('div'), el('div', 'eyebrow', '运行记录'), el('h2', '', '最近处理')),
+        append(el('div', 'auto-reply-quota'), tag(`${Number(a.sent_hour || 0)} / ${Number(a.hourly_limit || 0)} 本小时`), tag(`${Number(a.sent_day || 0)} / ${Number(a.daily_limit || 0)} 今日`))));
+      const list = el('div', 'auto-reply-recent-list');
+      const entries = (a.recent || []).slice(-12).reverse();
+      if (!entries.length) list.append(el('div', 'auto-reply-empty', '还没有自动回复记录。这里仅显示会话与处理结果，不会展示消息正文。'));
+      else for (const item of entries) {
+        const outcome = item.status === 'simulated' ? '模拟回复' : item.status === 'sent' ? '已发送' : item.status === 'skipped' ? '已跳过' : item.status === 'failed' ? '发送失败' : '已处理';
+        const cls = item.status === 'simulated' ? 'simulated' : item.status === 'sent' ? 'sent' : item.status === 'failed' ? 'failed' : 'skipped';
+        list.append(append(el('div', 'auto-reply-event'), append(el('span', `auto-reply-outcome ${cls}`), outcome), append(el('span', 'auto-reply-event-title'), item.is_group ? icon('people', 14) : null, el('span', '', item.title || '未知会话')), el('span', 'auto-reply-event-reason', autoReplyReason(item)), el('time', '', formatTime(item.at))));
+      }
+      recent.append(list); root.append(recent); return root;
+    }
+    function autoReplyNumberField(label, name, value, min, max, hint = '') {
+      const wrap = el('label', 'field'); wrap.append(el('span', 'field-label', label)); const input = el('input', 'input'); input.type = 'number'; input.id = `auto-reply-${name}`; input.name = name; input.min = String(min); input.max = String(max); input.step = '1'; input.value = String(autoReplyCount(value, min)); wrap.append(input); if (hint) wrap.append(el('span', 'field-hint', hint)); return wrap;
+    }
+    function autoReplyPolicy(form = $('.auto-reply-policy')) {
+      const read = name => Number(form?.elements?.namedItem(name)?.value);
+      return { group_mode: form?.elements?.namedItem('group_mode')?.value === 'all' ? 'all' : 'mention_only', debounce_seconds: read('debounce_seconds') || 4, cooldown_seconds: read('cooldown_seconds') ?? 45, hourly_limit: read('hourly_limit') || 8, daily_limit: read('daily_limit') || 40 };
+    }
+    function confirmAutoReplyStart() {
+      const dialog = $('#editor'); dialog.replaceChildren(); dialog.className = 'dialog auto-reply-confirm';
+      const copy = append(el('div', 'auto-reply-confirm-copy'), el('span', 'auto-reply-confirm-symbol', '↗'), el('div', 'eyebrow', demo ? '合成演示' : '发送前确认'), el('h2', '', demo ? '模拟启动自动回复' : '知弦将代表你发送微信消息'), el('p', '', demo ? '演示模式只会更新合成状态，不会连接微信或发送消息。自动发送回复将使用固定后缀“（以上内容为知弦生成）”。' : `当前名单包含 ${autoReplyState().allowlist?.length || 0} 个会话。收到新消息后，知弦可能会自动生成并发送回复。每条自动发送回复末尾都会附上固定署名“（以上内容为知弦生成）”。`));
+      const checks = el('div', 'auto-reply-confirm-checks');
+      const check = el('input'); check.type = 'checkbox'; check.id = 'auto-reply-confirm-check';
+      checks.append(append(el('label', 'auto-reply-confirm-check'), check, el('span', '', demo ? '我已了解这是合成演示，不会向微信发送消息。' : '我已检查允许回复的会话、群聊规则、发送限额和固定署名；我确认知弦可以通过微信发送消息。')));
+      const actions = append(el('div', 'dialog-footer'), button('返回检查', null, () => dialog.close()), button(demo ? '模拟启动' : '确认并启动', 'play', async () => { if (!check.checked) return; const form = $('.auto-reply-policy'); if (form && !form.reportValidity()) return; await rpc('configure_auto_reply', { allowlist: autoReplyState().allowlist || [], ...autoReplyPolicy(form) }); await rpc('start_auto_reply', { acknowledge_send: true }); dialog.close(); await sync(); toast(demo ? '演示模式：仅更新合成状态，没有发送消息' : '自动回复已启动'); }, 'primary', true));
+      check.addEventListener('change', () => { const start = actions.querySelector('.btn.primary'); if (start) start.disabled = !check.checked; });
+      dialog.append(copy, checks, actions); dialog.showModal();
+    }
+    function confirmAutoReplyTypes(selected) {
+      const entries = selected.map(item => ({ ...item })), unknown = entries.filter(item => !item.auto_reply_type_known && !item.type);
+      if (!unknown.length) return Promise.resolve(entries.map(item => ({ session_id: item.session_id, title: item.title, is_group: item.type === 'group', type: item.type || (item.is_group ? 'group' : 'private') })));
+      return new Promise(resolve => {
+        const dialog = $('#editor'); dialog.replaceChildren(); dialog.className = 'dialog auto-reply-confirm';
+        const copy = append(el('div', 'auto-reply-confirm-copy'), el('div', 'eyebrow', '会话类型确认'), el('h2', '', '确认这些会话是单聊还是群聊'), el('p', '', 'OCR 目前无法可靠判断会话类型。请逐一选择；知弦不会把未知类型默认当成单聊。'));
+        const form = el('div', 'auto-reply-type-list');
+        for (const item of unknown) {
+          const row = el('label', 'field'); row.append(el('span', 'field-label', item.title));
+          const select = el('select', 'input'); select.dataset.sessionId = item.session_id; select.append(new Option('请选择会话类型', ''), new Option('单聊联系人', 'private'), new Option('群聊', 'group')); row.append(select); form.append(row);
+        }
+        const cancel = button('返回名单', null, () => { dialog.close(); resolve(null); });
+        const save = button('确认会话类型', 'check', () => {
+          for (const select of form.querySelectorAll('select')) { if (!select.value) return; const item = entries.find(entry => entry.session_id === select.dataset.sessionId); item.type = select.value; item.is_group = select.value === 'group'; }
+          dialog.close(); resolve(entries.map(item => ({ session_id: item.session_id, title: item.title, is_group: item.type === 'group', type: item.type || (item.is_group ? 'group' : 'private') })));
+        }, 'primary');
+        form.addEventListener('change', () => { save.disabled = [...form.querySelectorAll('select')].some(select => !select.value); }); save.disabled = true;
+        dialog.append(copy, form, append(el('div', 'dialog-footer'), cancel, save)); dialog.addEventListener('close', () => resolve(null), { once: true }); dialog.showModal();
+      });
+    }
+    function emergencyStop() {
+      const dialog = $('#editor'); dialog.replaceChildren(); dialog.className = 'dialog auto-reply-confirm';
+      dialog.append(append(el('div', 'auto-reply-confirm-copy'), el('div', 'eyebrow', '紧急控制'), el('h2', '', '立即停止自动回复？'), el('p', '', '知弦会停止后续发送，并清除尚未处理的自动回复任务。')),
+        append(el('div', 'dialog-footer'), button('继续运行', null, () => dialog.close()), button('紧急停止', 'close', async () => { await rpc('stop_auto_reply', { emergency: true }); dialog.close(); await sync(); toast('自动回复已紧急停止'); }, 'danger'))); dialog.showModal();
     }
 
     function historyControl(session) {
@@ -423,6 +534,6 @@ window.ZhixianExperience = Object.freeze({
       if (target && !target.disabled && !matchMedia('(prefers-reduced-motion: reduce)').matches) { target.classList.remove('interaction-pulse'); void target.offsetWidth; target.classList.add('interaction-pulse'); setTimeout(() => target.classList.remove('interaction-pulse'), 450); }
     });
     updateState(getState()); startIntro();
-    return { updateState, reconcileSnapshot, renderAppearance, renderMoments, openCatalog, messageContent, historyControl, chooseMedia, startIntro };
+    return { updateState, reconcileSnapshot, renderAppearance, renderMoments, renderAutoReply, openCatalog, messageContent, historyControl, chooseMedia, startIntro };
   }
 });

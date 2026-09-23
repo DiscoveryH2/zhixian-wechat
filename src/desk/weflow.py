@@ -118,9 +118,11 @@ def normalize_message(raw, session_id, incoming=False):
                    if str(raw.get(key) or "") not in ("", "0", "None")), None)
     if str(raw_id) in ("0", "None", ""):
         raw_id = stable_id(side, sender, timestamp, str(content))
+    directed = next((raw[key] for key in ("isAtMe", "atMe", "isMentionedMe")
+                     if isinstance(raw.get(key), bool)), None)
     return {"id": "wfmsg:" + stable_id(session_id, str(raw_id)), "side": side,
-            "text": str(content).strip(), "sender": sender, "timestamp": timestamp,
-            "source": "weflow", "kind": media_kind(raw)}
+             "text": str(content).strip(), "sender": sender, "timestamp": timestamp,
+             "source": "weflow", "kind": media_kind(raw), "directed_to_me": directed}
 
 
 class WeFlowClient:

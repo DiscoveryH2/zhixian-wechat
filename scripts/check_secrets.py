@@ -64,6 +64,7 @@ REVIEWED_ASSETS = {
     "docs/images/intro.png": "28e2dd0bed30120175e8caac10192663f1e954a31c97fa85f302dd742e825745",
     "docs/images/catalogue.png": "bf9dd39408256b49e128cbdb68a62daf4354ee3e4316ef0e34f75748cb6094dd",
     "docs/images/moments.png": "b724624feb9313ba726136e17527018ee6f79d2409bdde4eefac5820e87af99e",
+    "docs/images/auto-reply.png": "b38edc44560a8bb9e0f9b8e78aba699923402e90f5013b74b9c90414e52b2d63",
     "vendor/jev-chat-windows/docs/icon.ico": "fe7e379a97d323dddc1b3fac66d80fd9113ad1c08b0216d886cd2ba18b6788a9",
     "vendor/jev-chat-windows/docs/ui_home.png": "ef24f248cbe6cb8895a9a363845d857c80410d21c66910c52eea6ab2383ca9aa",
     "vendor/jev-chat-windows/docs/ui_settings.png": "83bc9bf2df279de0a29d908fa488632d2d085cb88b72a668b3458ee93cc303de",

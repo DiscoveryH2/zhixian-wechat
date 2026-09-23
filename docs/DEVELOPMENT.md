@@ -22,7 +22,7 @@ src/
   main.py                 Windows 桌面壳、托盘与启动参数
   desk/                   控制器、数据存储、界面桥接、消息源
   core/                   Jev 判断、回复生成、协议与模型路由
-  app/                    Windows 捕获、OCR 和安全粘贴
+  app/                    Windows 捕获、OCR、安全粘贴与已核验发送
 ui/                       本地 HTML、CSS、JavaScript 和界面资源
 tests/                    单元测试、合成 OCR 和模拟服务测试
 scripts/                  构建、许可收集和验证脚本
@@ -80,13 +80,15 @@ Jev 请求使用 `state` 与 `questions`，响应需包含有效的 typed `answe
 
 单元测试覆盖模型协议、路由和错误处理、消息方向和去重、安全回填拒绝、存储及会话状态；合成 OCR 测试使用本机离线模型识别生成的中文图像。`smoke_bridge.py` 通过本机模拟接口检查 QtWebChannel 到后端的完整链路。
 
+自动回复测试应优先使用合成会话、虚拟时钟和模拟输入框。发送路径必须在按键之前重新确认当前可见目标、最新来信、输入框为空且聚焦、以及填入文本与带披露后缀的预期草稿一致；不能通过屏幕外切换或 WeFlow 发送接口发送。真实微信验证需单独记录为真实窗口测试，合成测试不代表真实送达。
+
 这些测试不能证明所有微信版本、DPI、布局或外部模型服务均兼容。报告验证结果时，区分模拟服务、合成 OCR、真实窗口采集和外部服务调用，不把其中一种验证写成另一种。
 
 ## 构建便携版
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/build.ps1
-.\.venv\Scripts\python.exe scripts/package_portable.py --input outputs/build/Zhixian --output outputs/Zhixian-1.2.0-Windows.zip
+.\.venv\Scripts\python.exe scripts/package_portable.py --input outputs/build/Zhixian --output outputs/Zhixian-1.3.0-Windows.zip
 ```
 
 构建脚本先运行测试，再使用 PyInstaller 生成 `outputs/build/Zhixian/`，收集上游和运行组件的许可文件。打包脚本从该目录生成便携 ZIP，排除应用个人数据文件。构建目标如果已有用户数据，脚本会拒绝覆盖；可通过 `-OutputDirectory` 选择新的构建目录。
@@ -96,7 +98,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build.ps1
 ## 发布前
 
 1. 运行测试、合成演示界面和打包启动验证。
-2. 检查应用版本、发行文件名与发布说明一致。
+2. 检查应用版本、发行文件名与[发行说明](releases/1.3.0.md)一致。
 3. 检查 ZIP 清单，确认不含 `data/`、真实聊天、凭据、私人笔记或开发环境。
 4. 保留本项目 LICENSE、上游 LICENSE / NOTICE 和第三方运行组件许可；新增字体等资源也要包含对应许可。
 5. 使用合成数据制作公开截图，说明已验证的环境和仍存在的兼容性限制。

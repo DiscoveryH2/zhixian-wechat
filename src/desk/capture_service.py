@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections import deque
 import queue
+import re
 import threading
 import time
 
@@ -144,6 +145,12 @@ class CaptureService:
         self._wake.set()
         return {"success": True}
 
+    def cancel_pending_writes(self):
+        """Invalidate queued/in-flight paste or send requests without pausing OCR."""
+        with self._lock:
+            self._control_epoch += 1
+        self._wake.set()
+
     def stop(self, wait=True):
         self._control_epoch += 1
         self._stop.set()
@@ -182,6 +189,28 @@ class CaptureService:
         if task.get("error"):
             raise RuntimeError(task["error"])
         return task.get("result", {"success": False})
+
+    def send(self, text, session_title, expected_incoming, expected_sender="", expected_previous=""):
+        """Send only after a new on-screen target and composer check.
+
+        This method never switches chats. If the target conversation is not
+        already visible in WeChat, the worker refuses the send.
+        """
+        if not str(text).strip() or not str(session_title).strip() or not str(expected_incoming).strip():
+            raise RuntimeError("自动发送需要明确的新消息与目标会话")
+        task = {"mode": "send", "text": str(text), "title": str(session_title),
+                "expected_incoming": str(expected_incoming), "expected_sender": str(expected_sender or ''),
+                "expected_previous": str(expected_previous or ''),
+                "done": threading.Event(), "cancelled": threading.Event(), "epoch": self._control_epoch}
+        self._requests.put(task)
+        self._ensure_thread()
+        self._wake.set()
+        if not task["done"].wait(30):
+            task["cancelled"].set()
+            raise RuntimeError("自动发送核验超时；状态可能不确定，请检查微信")
+        if task.get("error"):
+            raise RuntimeError(task["error"])
+        return task.get("result", {"success": False, "status": "unconfirmed"})
 
     def reset_history(self):
         self._reset.set()
@@ -284,10 +313,11 @@ class CaptureService:
         self._status("live", "正在读取当前微信聊天；截图仅在内存中处理", "ocr")
         return title, area[:4], at
 
-    def _announce_session(self, sid, title, source):
+    def _announce_session(self, sid, title, source, session_type=None, talker=None):
         if self._announced != (sid, title, source):
             self._announced = (sid, title, source)
-            self._emit("session", {"id": sid, "title": title, "source": source, "active": True})
+            self._emit("session", {"id": sid, "title": title, "source": source, "active": True,
+                                   "type": session_type or 'unknown', "talker": talker or ''})
 
     def _fill_worker(self, task):
         from app.fill import fill
@@ -310,6 +340,94 @@ class CaptureService:
         area = verify()
         return fill(hwnd, area, task["text"], verify=verify, expected_window_title=native)
 
+    def _send_worker(self, task):
+        from app.auto_send import send_verified, _press_enter
+        from app.ocr import Reader, _engine
+        from app.winapi import libraries, window_title
+        self._close_capture()
+        self._ensure_capture()
+        hwnd, native = self._hwnd, self._native_title
+        reader = Reader()
+
+        def target_frame():
+            if task['cancelled'].is_set() or self._stop.is_set() or task['epoch'] != self._control_epoch:
+                raise RuntimeError('自动发送已取消')
+            full, at = self._frame(wait=2)
+            title, area, at = self._read_frame(full, at, emit=False)
+            check_fill_target(task['title'], title, time.monotonic() - at,
+                              self._hwnd == hwnd and window_title(hwnd) == native)
+            x0, y0, x1, y1 = area
+            chat = full[y0:y1, x0:x1]
+            pane_bg = self._cap.area[4] if self._cap and self._cap.area else full[y0, x0]
+            visible = [line for line in reader.read(chat, pane_bg) if line[0] in ('her', 'other', 'me')]
+            incoming = [line for line in visible if line[0] in ('her', 'other')]
+            if not incoming or re.sub(r'\s+', '', incoming[-1][2]) != re.sub(r'\s+', '', task['expected_incoming']):
+                raise RuntimeError('当前窗口最后一条对方消息与待回复消息不同，已拒绝发送')
+            if task['expected_sender'] and incoming[-1][1] != task['expected_sender']:
+                raise RuntimeError('群聊发言人已改变，已拒绝发送')
+            if task['expected_previous']:
+                last_index = next((index for index in range(len(visible)-1, -1, -1)
+                                   if visible[index] is incoming[-1]), -1)
+                before = visible[:last_index]
+                expected = re.sub(r'\s+', '', task['expected_previous'])
+                if not before or not any(re.sub(r'\s+', '', line[2]) == expected for line in before[-3:]):
+                    raise RuntimeError('当前窗口缺少可核对的上一条聊天上下文，已拒绝发送')
+            return full, area, at
+
+        def verify():
+            return target_frame()[1]
+
+        def inspect_composer():
+            deadline = time.monotonic() + 1.5
+            while True:
+                full, area, at = target_frame()
+                # WGC continuously timestamps frames. Require a frame captured
+                # after this probe begins so a pre-paste image is never reused.
+                if time.monotonic() - at < .12:
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('无法取得最新输入框画面，已取消发送')
+                time.sleep(.035)
+            x0, _, x1, y1 = area
+            h = full.shape[0]
+            if h - y1 < 85 or x1 - x0 < 200:
+                raise RuntimeError('微信输入区过小，已取消发送')
+            composer = full[y1 + 30:h - 42, x0 + 24:x1 - 72]
+            if composer.size == 0:
+                raise RuntimeError('无法定位微信输入框，已取消发送')
+            rows, _ = _engine()(composer, use_cls=False)
+            text = ''.join(str(row[1]) for row in sorted(rows or [], key=lambda row: (row[0][0][1], row[0][0][0])))
+            u, _, _ = libraries()
+            return {'text': text.strip(), 'focused': bool(u.GetForegroundWindow() == hwnd),
+                    'target_ok': True, 'at': at}
+
+        area = verify()
+        def press_if_still_armed():
+            # Share the epoch lock with emergency stop. Once stop returns, an
+            # in-flight task cannot slip an Enter key event past that boundary.
+            with self._lock:
+                if task['cancelled'].is_set() or self._stop.is_set() or task['epoch'] != self._control_epoch:
+                    raise RuntimeError('自动发送已取消')
+                _press_enter()
+        result = send_verified(hwnd, area, task['text'], verify=verify,
+                               inspect_composer=inspect_composer, expected_window_title=native,
+                               press_send=press_if_still_armed)
+        # A key press is not delivery proof. Confirm both an empty composer and
+        # a matching outgoing bubble; otherwise keep the result uncertain.
+        try:
+            time.sleep(.35)
+            full, area, _ = target_frame()
+            x0, y0, x1, y1 = area
+            chat = full[y0:y1, x0:x1]
+            pane_bg = self._cap.area[4] if self._cap and self._cap.area else full[y0, x0]
+            outgoing = [line for line in reader.read(chat, pane_bg) if line[0] == 'me']
+            composer = inspect_composer()
+            if outgoing and re.sub(r'\s+', '', outgoing[-1][2]) == re.sub(r'\s+', '', task['text']) and not composer['text']:
+                result = {'success': True, 'status': 'sent', 'message': '已在当前微信会话确认新发出的文字气泡'}
+        except Exception:
+            pass
+        return result
+
     def _drain_requests(self):
         while True:
             try:
@@ -319,7 +437,7 @@ class CaptureService:
             try:
                 if task["cancelled"].is_set() or self._stop.is_set():
                     raise RuntimeError("填入请求已取消")
-                task["result"] = self._fill_worker(task)
+                task["result"] = self._send_worker(task) if task.get('mode') == 'send' else self._fill_worker(task)
             except Exception as exc:
                 task["error"] = str(exc)[:200]
             finally:
@@ -345,10 +463,12 @@ class CaptureService:
             if msg and self._remember_wf(msg):
                 msg["historical"] = historical
                 messages.append(msg)
-        self._announce_session(sid, title, "weflow")
+        session_type = 'group' if talker.endswith('@chatroom') else 'private'
+        self._announce_session(sid, title, "weflow", session_type, talker)
         if messages:
             self._emit("messages", {"session_id": sid, "title": title, "source": "weflow",
-                                    "messages": messages, "historical": historical})
+                                    "messages": messages, "historical": historical,
+                                    "type": session_type, "talker": talker})
 
     def _weflow_initial(self, client):
         sessions = client.sessions(limit=1)

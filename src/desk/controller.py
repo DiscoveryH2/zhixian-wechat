@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -15,11 +16,14 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QFileDialog
 
-from .store import Store
+from .store import Store, _atomic, _load
+from .auto_reply import AutoReplyGuard
 from .imports import ChatLabImporter
 from .datahub import DataHub
 from .version import VERSION
 from .tasks import ModelTasks, HelperTasks
+
+AUTO_DISCLOSURE = '（以上内容为知弦生成）'
 
 
 class Controller(QObject):
@@ -32,6 +36,7 @@ class Controller(QObject):
     sessionLoaded = Signal(str, object, object)
     importFinished = Signal(object, object)
     mediaFinished = Signal(str, str, object, object)
+    autoSendFinished = Signal(str, object, object)
 
     def __init__(self, directory: Path):
         super().__init__()
@@ -64,6 +69,32 @@ class Controller(QObject):
         self.inflight = None
         self.pending = None
         self.pending_manual = False
+        self.auto_file = self.store.directory / 'auto-reply.json'
+        saved_auto = _load(self.auto_file, {})
+        saved_auto = saved_auto if isinstance(saved_auto, dict) else {}
+        guard_state = saved_auto.get('guard')
+        self.auto_integrity_error = self.auto_file.exists() and not (
+            saved_auto.get('version') == 1 and isinstance(guard_state, dict) and
+            isinstance(guard_state.get('seen'), list) and isinstance(guard_state.get('sent'), list) and
+            isinstance(saved_auto.get('allowlist'), list))
+        try:
+            self.auto_guard = AutoReplyGuard(guard_state)
+        except (TypeError, ValueError):
+            self.auto_integrity_error = True
+            self.auto_guard = AutoReplyGuard()
+        self.auto_policy = self._auto_policy_from(saved_auto.get('policy'))
+        self.auto_policy['enabled'] = False  # Every launch requires an explicit opt-in.
+        self.auto_allowlist = [entry for entry in (saved_auto.get('allowlist') or [])
+                               if isinstance(entry, dict) and entry.get('session_id') and entry.get('type') in ('private', 'group')][:50]
+        self.auto_paused = False
+        self.auto_detail = ('自动回复状态文件无法可靠读取；请重新保存名单并重启应用后再启用。'
+                            if self.auto_integrity_error else
+                            '默认关闭。选择会话并明确启用后，只回复新收到的消息。')
+        self.auto_recent = []
+        self.auto_trigger = None
+        self.auto_running_trigger = None
+        self.auto_epoch = 0
+        self.auto_send_busy = False
         self.closed = False
         self.allow_initial = False
         self.paused_by_user = False
@@ -76,6 +107,7 @@ class Controller(QObject):
         self.sessionLoaded.connect(self._on_session_loaded)
         self.importFinished.connect(self._on_import_finished)
         self.mediaFinished.connect(self._on_media_finished)
+        self.autoSendFinished.connect(self._on_auto_sent)
         self._sync_hub()
         if self.store.config['source'] in ('weflow', 'auto') and self.store.secrets['weflow_token']:
             self.hub.prewarm(self.store.full_config(), limit=5)
@@ -89,6 +121,277 @@ class Controller(QObject):
     def _appearance(self):
         return {'theme': self.store.config['theme'], 'font_scale': self.store.config['font_scale'],
                 'background_url': self.background_url}
+
+    @staticmethod
+    def _auto_policy_from(value):
+        data = value if isinstance(value, dict) else {}
+        def bounded(name, default, minimum, maximum):
+            try:
+                return min(maximum, max(minimum, int(data.get(name, default))))
+            except (TypeError, ValueError):
+                return default
+        return {'enabled': False, 'session_ids': [],
+                'group_mode': data.get('group_mode') if data.get('group_mode') in ('mention_only', 'all') else 'mention_only',
+                'debounce_seconds': bounded('debounce_seconds', 3, 2, 15),
+                'cooldown_seconds': bounded('cooldown_seconds', 60, 15, 3600),
+                'hourly_limit': bounded('hourly_limit', 10, 1, 30),
+                'daily_limit': bounded('daily_limit', 30, 1, 100)}
+
+    def _auto_public(self):
+        now = time.time()
+        sent = self.auto_guard.snapshot().get('sent', [])
+        enabled = self.auto_policy['enabled']
+        status = 'off' if not enabled else 'paused' if self.auto_paused else 'running' if self.status['capture'] == 'live' else 'blocked'
+        return {'enabled': enabled, 'paused': self.auto_paused, 'status': status,
+                'detail': self.auto_detail, 'allowlist': copy.deepcopy(self.auto_allowlist),
+                'group_mode': self.auto_policy['group_mode'],
+                'debounce_seconds': self.auto_policy['debounce_seconds'],
+                'cooldown_seconds': self.auto_policy['cooldown_seconds'],
+                'hourly_limit': self.auto_policy['hourly_limit'],
+                'daily_limit': self.auto_policy['daily_limit'],
+                'sent_hour': sum(1 for item in sent if now - item['at'] < 3600),
+                'sent_day': sum(1 for item in sent if now - item['at'] < 86400),
+                'recent': copy.deepcopy(self.auto_recent[-12:])}
+
+    def _save_auto_state(self):
+        # Never restore an armed sender after process restart. This file contains
+        # only local session metadata and deduplication IDs, no message text.
+        stored = {**self.auto_policy, 'enabled': False}
+        stored['session_ids'] = []
+        guard = self.auto_guard.snapshot()
+        guard['pending'] = {}
+        _atomic(self.auto_file, {'version': 1, 'policy': stored,
+                                  'allowlist': self.auto_allowlist, 'guard': guard})
+
+    def _auto_record(self, sid, status, reason):
+        session = self.sessions.get(sid) or {}
+        chosen = next((item for item in self.auto_allowlist if item['session_id'] == sid), {})
+        self.auto_recent.append({'id': uuid.uuid4().hex, 'title': str(session.get('title') or chosen.get('title') or '会话')[:100],
+                                 'is_group': chosen.get('type') == 'group', 'at': time.time(),
+                                 'status': status, 'reason': str(reason)[:160]})
+        self.auto_recent = self.auto_recent[-20:]
+
+    def _cancel_auto_work(self):
+        self.auto_epoch += 1
+        self.auto_trigger = None
+        self.auto_running_trigger = None
+        if hasattr(self.capture, 'cancel_pending_writes'):
+            self.capture.cancel_pending_writes()
+
+    def _configure_auto(self, params):
+        entries = params.get('allowlist')
+        if not isinstance(entries, list) or len(entries) > 50:
+            raise ValueError('请从会话目录选择不超过 50 个联系人或群聊。')
+        resolved, seen = [], set()
+        for raw in entries:
+            if not isinstance(raw, dict):
+                raise ValueError('自动回复会话配置无效。')
+            sid = str(raw.get('session_id') or '')[:256]
+            if not sid or sid in seen:
+                continue
+            with self.catalog_lock:
+                meta = copy.deepcopy(self.catalog_items.get(sid))
+            meta = meta or copy.deepcopy(self.sessions.get(sid))
+            if not meta or meta.get('source') not in ('ocr', 'weflow'):
+                raise ValueError('自动回复只能选择实时微信会话，不能选择导入归档。')
+            if meta.get('source') == 'ocr' and (sid != self.live_id or self.status['capture'] != 'live'):
+                raise ValueError('OCR 自动回复只能选择当前微信正在显示的会话。')
+            if meta.get('source') == 'weflow':
+                talker = str(meta.get('talker') or '')
+                kind = 'group' if talker.endswith('@chatroom') else meta.get('type')
+                if kind not in ('private', 'group'):
+                    raise ValueError('WeFlow 未提供可靠的会话类型，已拒绝自动发送。')
+            else:
+                kind = raw.get('type')
+                if kind not in ('private', 'group'):
+                    raise ValueError('请明确确认当前 OCR 会话是单聊还是群聊。')
+            resolved.append({'session_id': sid, 'title': str(meta.get('title') or '')[:200],
+                             'type': kind, 'is_group': kind == 'group', 'source': meta['source']})
+            seen.add(sid)
+        if len({entry['source'] for entry in resolved}) > 1:
+            raise ValueError('自动回复一次只能使用 OCR 当前会话或 WeFlow 会话，不能混合两个实时来源。')
+        self._cancel_auto_work()
+        self.auto_allowlist = resolved
+        self.auto_policy = self._auto_policy_from(params)
+        self.auto_policy['session_ids'] = [entry['session_id'] for entry in resolved]
+        self.auto_paused = False
+        self.auto_detail = '配置已保存，默认关闭；启用后会向微信当前可核验的会话直接发送回复。'
+        try:
+            self._save_auto_state()
+        except OSError:
+            self.auto_policy['enabled'] = False
+            self.auto_detail = '无法保存自动回复状态，已拒绝启动。'
+            raise
+        self.emit()
+        return self._auto_public()
+
+    def _start_auto(self, params):
+        if self.auto_integrity_error:
+            raise ValueError('自动回复去重或限额状态损坏；请重新保存名单并重启应用后再启用。')
+        if params.get('acknowledge_send') is not True:
+            raise ValueError('请确认：自动回复会真正发送给所选微信联系人或群聊。')
+        if not self.auto_allowlist:
+            raise ValueError('请先选择允许自动回复的实时会话。')
+        if not self.store.secrets['api_key']:
+            raise ValueError('请先配置 Jev API Key。')
+        source = self.auto_allowlist[0].get('source')
+        if source == 'weflow' and self.store.config['source'] != 'weflow':
+            raise ValueError('请先在设置中启用已连接的 WeFlow 消息来源。')
+        if source == 'ocr' and (self.auto_allowlist[0]['session_id'] != self.live_id or self.status['capture'] != 'live'):
+            raise ValueError('请让已选的 OCR 会话保持在当前可见的微信窗口。')
+        from core.client import resolve_decision, resolve_reply
+        cfg = self.store.full_config()
+        if resolve_reply(cfg, resolve_decision(cfg)) is None:
+            raise ValueError('当前判断服务没有回复生成模型，请先配置生成服务。')
+        self.auto_policy['session_ids'] = [entry['session_id'] for entry in self.auto_allowlist]
+        self.auto_policy['enabled'] = True
+        self.auto_paused = False
+        self.auto_detail = '自动回复已启用；只处理启用之后的新入站文字，发送前还会核验微信窗口和输入框。'
+        if self.status['capture'] not in ('live', 'searching'):
+            self.capture.start(cfg)
+            self.status.update(capture='searching', detail='正在定位微信窗口…')
+        try:
+            self._save_auto_state()
+        except OSError:
+            self.auto_policy['enabled'] = False
+            self.auto_detail = '无法保存自动回复状态，已拒绝启动。'
+            raise
+        self.emit()
+        return self._auto_public()
+
+    def _stop_auto(self, emergency=False, pause=False):
+        self._cancel_auto_work()
+        if pause:
+            self.auto_paused = True
+            self.auto_detail = '自动回复已暂停；新消息不会发送。'
+        else:
+            self.auto_policy['enabled'] = False
+            self.auto_paused = False
+            self.auto_detail = '紧急停止已生效；已提交给微信的消息无法撤回。' if emergency else '自动回复已关闭。'
+        self._save_auto_state()
+        self.emit()
+        return self._auto_public()
+
+    def _auto_observe(self, session, message, capture_event):
+        if not self.auto_policy['enabled'] or self.auto_paused or self.auto_send_busy:
+            return None
+        if message.get('side') != 'other' or message.get('kind', 'text') != 'text' or not str(message.get('text') or '').strip():
+            return None
+        sid = session['id']
+        chosen = next((item for item in self.auto_allowlist if item['session_id'] == sid), None)
+        if not chosen:
+            return None
+        if chosen['type'] == 'group' and not str(message.get('sender') or '').strip():
+            self.auto_detail = '群聊发言人无法核对，未自动回复。'
+            return None
+        counters = self._auto_public()
+        if counters['sent_hour'] >= self.auto_policy['hourly_limit'] or counters['sent_day'] >= self.auto_policy['daily_limit']:
+            self.auto_detail = '自动回复已达到发送上限，未为这条消息调用模型。'
+            return None
+        typed = {**session, 'type': chosen['type']}
+        source = capture_event.get('source')
+        event = {'source': source, 'historical': bool(capture_event.get('historical')),
+                 'incoming': True, 'live_visible': source == 'ocr' and sid == self.live_id,
+                 'timestamp': time.time()}
+        observed = self.auto_guard.observe(typed, message, event, {'auto_reply_enabled': True}, self.auto_policy)
+        if not observed.allow:
+            return None
+        try:
+            self._save_auto_state()
+        except OSError:
+            self.auto_paused = True
+            self.auto_detail = '无法保存新消息去重状态，自动回复已暂停。'
+            return None
+        self.auto_trigger = {'session_id': sid, 'message': copy.deepcopy(message), 'event': event,
+                             'ready_at': observed.ready_at, 'epoch': self.auto_epoch,
+                             'type': chosen['type']}
+        self.auto_detail = '已检测到允许会话的新消息，正在等待对方发完并准备回复。'
+        return max(0, int((observed.ready_at - time.time()) * 1000))
+
+    def _auto_dispatch(self, trigger, result):
+        sid = trigger['session_id']
+        if (not self.auto_policy['enabled'] or self.auto_paused or self.auto_send_busy or
+                trigger['epoch'] != self.auto_epoch or sid != self.live_id or
+                self.status['capture'] != 'live'):
+            self._auto_record(sid, 'skipped', '会话或自动回复状态已变化')
+            return
+        session = self.sessions.get(sid)
+        if not session or not session.get('messages') or session['messages'][-1].get('id') != trigger['message']['id']:
+            self._auto_record(sid, 'skipped', '已有更新的消息，旧候选未发送')
+            return
+        risk = result.get('risk')
+        if isinstance(risk, bool) or not isinstance(risk, (int, float)) or not 0 <= risk <= 3:
+            self._auto_record(sid, 'skipped', '风险判断较高或缺失，未自动发送')
+            return
+        if result.get('should_reply') is not True:
+            self._auto_record(sid, 'skipped', 'Jev 未明确认为实质回复适合当前时刻')
+            return
+        prior = next((str(m.get('text') or '') for m in reversed(session['messages'][:-1])
+                      if m.get('kind', 'text') == 'text' and str(m.get('text') or '').strip()), '')
+        if not prior:
+            self._auto_record(sid, 'skipped', '缺少可核验的上一条上下文，未发送')
+            return
+        candidates, index = result.get('candidates') or [], result.get('best_index')
+        if not isinstance(index, int) or not 0 <= index < len(candidates):
+            self._auto_record(sid, 'skipped', '没有经过 Jev 排序的可用回复')
+            return
+        draft = str(candidates[index].get('text') or '').strip()
+        reply = draft.replace(AUTO_DISCLOSURE, '').rstrip() + AUTO_DISCLOSURE
+        typed = {**session, 'type': trigger['type']}
+        claimed = self.auto_guard.claim(typed, trigger['message'], trigger['event'],
+                                        {'auto_reply_enabled': True}, self.auto_policy,
+                                        reply, incoming_text=trigger['message'].get('text', ''))
+        if not claimed.allow:
+            self._auto_record(sid, 'skipped', '发送边界未通过：' + claimed.reason)
+            return
+        # Claim before dispatch prevents reconnect/restart from sending twice.
+        try:
+            self._save_auto_state()
+        except OSError:
+            self.auto_paused = True
+            self.auto_detail = '无法保存发送去重状态，自动回复已暂停。'
+            self._auto_record(sid, 'failed', '发送状态未能安全保存')
+            return
+        self.auto_send_busy = True
+        self.auto_detail = '正在对微信当前窗口与输入框做最终核验。'
+        sender = trigger['message'].get('sender', '') if trigger['type'] == 'group' else ''
+        try:
+            future = self.pool.submit(self.capture.send, reply, session['title'],
+                                      trigger['message'].get('text', ''), sender, prior)
+            future.add_done_callback(lambda done: self._emit_auto_send_done(sid, trigger['epoch'], done))
+        except Exception:
+            self.auto_send_busy = False
+            self.auto_paused = True
+            self.auto_detail = '自动发送任务未能启动，已暂停。'
+            self._auto_record(sid, 'failed', '发送任务启动失败')
+
+    def _emit_auto_send_done(self, sid, epoch, future):
+        if self.closed or future.cancelled():
+            return
+        try:
+            self.autoSendFinished.emit(sid, {'epoch': epoch, 'result': future.result()}, None)
+        except Exception as exc:
+            self.autoSendFinished.emit(sid, {'epoch': epoch}, self.safe_error(exc))
+
+    def _on_auto_sent(self, sid, payload, error):
+        if self.closed:
+            return
+        self.auto_send_busy = False
+        result = payload.get('result') if isinstance(payload, dict) else None
+        status = result.get('status') if isinstance(result, dict) else None
+        if status == 'sent':
+            self._auto_record(sid, 'sent', '当前微信会话已出现对应发出气泡')
+            self.auto_detail = '上一条回复已在微信当前会话确认；继续等待新消息。'
+        elif status == 'sent_unconfirmed':
+            self.auto_paused = True
+            self._auto_record(sid, 'failed', '已按下发送键，但未能确认送达；已暂停，请检查微信')
+            self.auto_detail = '发送结果尚未确认，自动回复已暂停。请检查微信后再启用。'
+        else:
+            self.auto_paused = True
+            self._auto_record(sid, 'failed', '安全核验或发送失败，已暂停')
+            self.auto_detail = '安全核验未通过，自动回复已暂停。'
+        self._save_auto_state()
+        self.emit()
 
     def _sync_hub(self):
         self.hub.set_local_sessions(self.sessions)
@@ -153,10 +456,13 @@ class Controller(QObject):
             raise ValueError('未成功导入任何 ChatLab 会话，请检查导出格式与帐号 ID。')
         return aggregate
 
-    @staticmethod
-    def _catalog_item(item):
+    def _catalog_item(self, item):
         result = dict(item)
         result['is_group'] = item.get('type') == 'group' or str(item.get('talker') or '').endswith('@chatroom')
+        source = item.get('source')
+        result['auto_reply_eligible'] = bool(source == 'weflow' or
+                                             (source == 'ocr' and item.get('id') == self.live_id and self.status['capture'] == 'live'))
+        result['auto_reply_type_known'] = source == 'weflow' and item.get('type') in ('private', 'group')
         return result
 
     def _list_sessions_task(self, config, query, cursor, limit, source, collected_snapshot=None):
@@ -421,13 +727,17 @@ class Controller(QObject):
             current['active'] = self.current_id == self.live_id and self.status['capture'] == 'live'
         session_list = [{'id': s['id'], 'title': s['title'], 'count': len(s.get('messages', [])),
                          'preview': s.get('messages', [{}])[-1].get('text', '')[:100] if s.get('messages') else '',
-                         'updated': s.get('updated', 0), 'source': s.get('source', 'ocr')}
-                        for s in sorted(self.sessions.values(), key=lambda s: s.get('updated', 0), reverse=True)]
+                         'updated': s.get('updated', 0), 'source': s.get('source', 'ocr'),
+                         'type': s.get('type', 'unknown'),
+                         'auto_reply_eligible': s.get('source') == 'weflow' or
+                                                (s.get('source') == 'ocr' and s['id'] == self.live_id and self.status['capture'] == 'live'),
+                         'auto_reply_type_known': s.get('source') == 'weflow' and s.get('type') in ('private', 'group')}
+                         for s in sorted(self.sessions.values(), key=lambda s: s.get('updated', 0), reverse=True)]
         return {'config': self.store.public_config(), 'status': dict(self.status), 'sessions': session_list,
                 'current_session': current, 'analysis': copy.deepcopy(self.results.get(self.current_id)),
                 'notes': copy.deepcopy(self.store.notes), 'contacts': copy.deepcopy(self.store.contacts),
-                'catalog': copy.deepcopy(self.catalog), 'moments': copy.deepcopy(self.moments),
-                'appearance': self._appearance(),
+                 'catalog': copy.deepcopy(self.catalog), 'moments': copy.deepcopy(self.moments),
+                 'appearance': self._appearance(), 'auto_reply': self._auto_public(),
                 'version': VERSION}
 
     def emit(self):
@@ -442,6 +752,14 @@ class Controller(QObject):
     def handle(self, method, params):
         if method == 'bootstrap':
             return self.snapshot()
+        if method == 'configure_auto_reply':
+            return self._configure_auto(params)
+        if method == 'start_auto_reply':
+            return self._start_auto(params)
+        if method == 'pause_auto_reply':
+            return self._stop_auto(pause=True)
+        if method == 'stop_auto_reply':
+            return self._stop_auto(emergency=bool(params.get('emergency')))
         if method == 'list_sessions':
             config = self.store.full_config()
             # The worker must not iterate mutable Qt-owned session state.
@@ -603,6 +921,8 @@ class Controller(QObject):
             self.emit()
             return {'success': True, 'appearance': self._appearance()}
         if method == 'save_config':
+            if self.auto_policy['enabled']:
+                self._stop_auto()
             self.store.save_config(params.get('config', {}))
             self.revision += 1
             self.windowAction.emit('always_on_top', self.store.config['always_on_top'])
@@ -618,6 +938,8 @@ class Controller(QObject):
             self.emit()
             return {'success': True}
         if method == 'pause_capture':
+            if self.auto_policy['enabled']:
+                self._stop_auto(pause=True)
             self.paused_by_user = True
             self.capture.pause()
             self.revision += 1
@@ -686,6 +1008,7 @@ class Controller(QObject):
                     count += 1
             result = {'success': True, 'count': count}
         elif method == 'clear_history':
+            self._stop_auto()
             self.revision += 1
             self.sessions.clear()
             self.results.clear()
@@ -848,10 +1171,18 @@ class Controller(QObject):
             self.status['connected'] = self.status['capture'] == 'live'
             if self.status['capture'] == 'error':
                 self.status['last_error'] = self.safe_error(data.get('detail') or '采集未完成。')
+                if self.auto_policy['enabled']:
+                    self._cancel_auto_work()
+                    self.auto_paused = True
+                    self.auto_detail = '微信采集失去可靠状态，自动回复已暂停。'
             elif self.status['capture'] == 'live':
                 self.status['last_error'] = ''
         elif kind == 'error':
             self.status.update(capture='error', connected=False, last_error=data.get('message', '采集失败'))
+            if self.auto_policy['enabled']:
+                self._cancel_auto_work()
+                self.auto_paused = True
+                self.auto_detail = '微信消息状态发生变化，自动回复已暂停。'
         elif kind in ('session', 'messages'):
             ident = data.get('session_id') or data.get('id')
             if not ident:
@@ -867,8 +1198,12 @@ class Controller(QObject):
                 if self.current_id is None or self.follow_live:
                     self.current_id = ident
             session = self.sessions.setdefault(ident, {'id': ident, 'title': data.get('title', '当前会话'),
-                                                       'source': data.get('source', 'ocr'), 'messages': [], 'updated': time.time()})
+                                                        'source': data.get('source', 'ocr'), 'messages': [], 'updated': time.time()})
             session['title'] = data.get('title') or session['title']
+            if data.get('type') in ('private', 'group'):
+                session['type'] = data['type']
+            if data.get('talker'):
+                session['talker'] = data['talker']
             if kind == 'messages':
                 historical = bool(data.get('historical', False))
                 initial_allowed = self.allow_initial
@@ -876,6 +1211,11 @@ class Controller(QObject):
                 # OCR cannot distinguish an entirely different viewport from scrolled-back
                 # history. Never append such a batch as the newest conversation context.
                 if historical and session['messages'] and data.get('source') == 'ocr' and not initial_allowed:
+                    if self.auto_policy['enabled'] and ident in self.auto_policy['session_ids']:
+                        self._cancel_auto_work()
+                        self.auto_paused = True
+                        self.auto_detail = '当前 OCR 会话视口出现无法对齐的旧记录或切换，自动回复已暂停。'
+                        self._save_auto_state()
                     self.emit()
                     return
                 known = {m['id'] for m in session['messages']}
@@ -899,11 +1239,15 @@ class Controller(QObject):
                 if added and added[-1].get('side') == 'me' and self.pending == ident and not self.pending_manual:
                     self.pending = None
                     self.timer.stop()
-                if (added and added[-1].get('side') == 'other' and cfg['auto_analyze'] and cfg['api_key']
-                        and (not historical or initial_allowed)):
+                    self.auto_trigger = None
+                auto_delay = None
+                if added and added[-1].get('side') == 'other' and cfg['api_key'] and not historical:
+                    auto_delay = self._auto_observe(session, added[-1], data)
+                if (added and added[-1].get('side') == 'other' and cfg['api_key']
+                        and ((cfg['auto_analyze'] and (not historical or initial_allowed)) or auto_delay is not None)):
                     self.pending = ident
                     self.pending_manual = False
-                    self.timer.start(cfg['debounce_ms'])
+                    self.timer.start(max(cfg['debounce_ms'], auto_delay or 0))
             self.status.update(capture='live', connected=True, last_error='')
             self._sync_hub()
         self.emit()
@@ -911,6 +1255,12 @@ class Controller(QObject):
     def _run_pending(self):
         if self.inflight or not self.pending or self.closed:
             return
+        if (self.auto_trigger and not self.pending_manual and
+                self.auto_trigger['session_id'] == self.pending):
+            remaining = self.auto_trigger['ready_at'] - time.time()
+            if remaining > 0:
+                self.timer.start(max(50, int(remaining * 1000)))
+                return
         ident, self.pending = self.pending, None
         manual, self.pending_manual = self.pending_manual, False
         session = copy.deepcopy(self.sessions.get(ident))
@@ -920,7 +1270,20 @@ class Controller(QObject):
         if not manual and session['messages'][-1].get('side') != 'other':
             return
         fingerprint = self.fingerprint(session)
+        self.auto_running_trigger = None
+        if (not manual and self.auto_trigger and self.auto_trigger['session_id'] == ident and
+                self.auto_trigger['message']['id'] == session['messages'][-1].get('id') and
+                self.auto_trigger['epoch'] == self.auto_epoch and self.auto_policy['enabled'] and not self.auto_paused):
+            self.auto_running_trigger = self.auto_trigger
+            self.auto_trigger = None
         background, contact = self.store.background(session['title'], session['messages'])
+        if self.auto_running_trigger:
+            # Unattended replies use only this conversation. Private notes and
+            # contact metadata must not be copied into an outgoing draft.
+            background, contact = '', None
+            cfg['style'] = (str(cfg.get('style') or '')[:2000] +
+                            '\n自动回复请用不超过130字的自然短句，只回答当前消息；不编造事实、承诺或私聊之外的背景。'
+                            '无需添加来源标识，应用会在发送前附加固定的知弦生成说明。')
         if contact and contact.get('relationship'):
             cfg['relationship'] = contact['relationship']
         self.job_serial += 1
@@ -951,19 +1314,26 @@ class Controller(QObject):
 
     def _on_analysis(self, ident, revision, fingerprint, result, error):
         self.inflight = None
+        auto_trigger, self.auto_running_trigger = self.auto_running_trigger, None
         if self.closed:
             return
         if revision == self.revision and ident in self.sessions:
             if error:
                 self.status.update(analysis='error', last_error=error)
                 self.toast.emit(error, 'error')
+                if auto_trigger:
+                    self.auto_paused = True
+                    self.auto_detail = '模型分析失败，自动回复已暂停。'
+                    self._auto_record(ident, 'failed', '模型分析失败')
             elif self.fingerprint(self.sessions[ident]) == fingerprint:
                 self.results[ident] = result
                 self.result_fingerprints[ident] = fingerprint
                 self.status.update(analysis='idle', last_error='')
+                if auto_trigger:
+                    self._auto_dispatch(auto_trigger, result)
             else:
                 self.status['analysis'] = 'idle'
-                if (self.store.config['auto_analyze'] and self.status['capture'] == 'live'
+                if ((self.store.config['auto_analyze'] or self.auto_policy['enabled']) and self.status['capture'] == 'live'
                         and self.sessions[ident]['messages'][-1].get('side') == 'other'):
                     self.pending = ident
                     self.pending_manual = False

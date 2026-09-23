@@ -2,11 +2,11 @@
 
 **读懂眼前的对话，想好再回复。**
 
-知弦 PC 是面向 Windows 微信的开源对话助手：从当前窗口、你导入的聊天记录或已连接的 WeFlow 取得上下文，用 Jev 分析可能的意图、需求与回应风险，再生成候选回复。你可以复制或填入输入框，最后由你检查、修改和发送。
+知弦 PC 是面向 Windows 微信的开源对话助手：从当前窗口、你导入的聊天记录或已连接的 WeFlow 取得上下文，用 Jev 分析可能的意图、需求与回应风险，再生成候选回复。通常由你检查、修改和发送；也可单独启用受白名单、会话核验和限额约束的自动回复。
 
-A Windows WeChat conversation assistant with local OCR, Jev judgments, and reply drafts. You stay in control of what gets sent.
+A Windows WeChat conversation assistant with local OCR, Jev judgments, reply drafts, and optional, tightly scoped automatic replies.
 
-**当前版本：1.2.0** · [下载 Windows 便携版](https://github.com/DiscoveryH2/zhixian-wechat/releases/latest) · [快速开始](#快速开始) · [更新记录](CHANGELOG.md) · [隐私说明](docs/PRIVACY.md)
+**当前版本：1.3.0 预览版** · [下载 Windows 便携版](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.3.0) · [1.3.0 发行说明](docs/releases/1.3.0.md) · [快速开始](#快速开始) · [更新记录](CHANGELOG.md) · [隐私说明](docs/PRIVACY.md)
 
 ## 看看界面
 
@@ -26,6 +26,12 @@ A Windows WeChat conversation assistant with local OCR, Jev judgments, and reply
 
 ![知弦 PC 合成朋友圈动态和按需配图](docs/images/moments.png)
 
+### 自动回复控制台
+
+会话名单、群聊规则、发送限额和紧急停止集中在独立页面；启用需要再次确认。
+
+![知弦 PC 自动回复控制台，展示合成会话和模拟状态](docs/images/auto-reply.png)
+
 ### 精简模式
 
 保留当前判断和候选，适合放在微信旁边，也可以设置窗口置顶。
@@ -38,7 +44,7 @@ A Windows WeChat conversation assistant with local OCR, Jev judgments, and reply
 
 目标环境为 **Windows 10 / Windows 11、微信 Windows 4.x**。窗口布局、缩放和微信版本会影响 OCR；当前不提供 macOS 或 Linux 客户端。
 
-1. 从 [Releases](https://github.com/DiscoveryH2/zhixian-wechat/releases/latest) 下载 Windows 便携包，**完整解压**后运行 `Zhixian.exe`。便携版包含 Python 运行环境和离线 OCR 模型，不需要另装 Python、Node 或安卓手机，也不需要微信数据库密钥。
+1. 从 [v1.3.0 预览版 Release](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.3.0) 下载 Windows 便携包，**完整解压**后运行 `Zhixian.exe`。便携版包含 Python 运行环境和离线 OCR 模型，不需要另装 Python、Node 或安卓手机，也不需要微信数据库密钥。需要已完成真机发送验证的稳定版时，可继续使用 [v1.2.0](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.2.0)。
 2. 在设置中填写下面三项，点击“测试连接”，确认结果后保存。
 3. 打开微信，进入需要辅助的聊天，保持窗口可见且未最小化，点击“开始观察”。默认会分析新收到的文字；可以暂停观察或关闭自动分析，改为手动分析。
 
@@ -59,7 +65,7 @@ A Windows WeChat conversation assistant with local OCR, Jev judgments, and reply
 - **读取当前聊天**：Windows 窗口捕获与离线中文 OCR，区分自己和对方的文字；支持暂停、恢复和单次读取。
 - **分析对话**：展示字面含义、可能意图、需求、建议行动、危险等级、是否适合实质回应与回应升级风险。
 - **准备回复**：生成最多三条候选，并由 Jev 排序；生成失败时仍保留有效判断，缺失的分数不会被编造。
-- **由你确认**：复制候选，或在重新核验微信窗口和会话后填入输入框。程序不按 Enter，也不点击发送。
+- **手动确认或受限自动回复**：默认由你检查、填入和发送。可选自动回复默认每次启动关闭，必须逐项启用会话白名单；发送前会重新核验当前可见会话、最新来信及空且聚焦的输入框，并校验填入内容。自动回复会添加 `（以上内容为知弦生成）`。
 - **补充背景**：本地联系人、姓名别名、关系、备注，以及支持标签和常驻背景的知识笔记。
 - **查找和翻阅会话**：按名称搜索联系人与群聊，先显示一页会话及最后消息摘要，再逐页加载历史；图片、语音等消息保留类型标签。
 - **主动导入历史**：支持 ChatLab JSON / JSONL 文件或导出目录，建立本机 SQLite 索引，按会话分页浏览，不把整份历史直接塞进模型。
@@ -69,7 +75,7 @@ A Windows WeChat conversation assistant with local OCR, Jev judgments, and reply
 - **手动分析**：粘贴文字对话，使用 `我：` / `对方：` 区分发言人。
 - **可选数据源**：已有兼容版 WeFlow 的用户可以通过本机 HTTP / SSE 读取消息。
 
-Jev 的意图、风险和概率是**基于有限上下文的模型估计**，不代表对方的真实想法，也不保证回复效果。上游 `should_reply_now` 关注下一条回复是否应包含实质内容，不是自动发送或立即发送的指令。
+Jev 的意图、风险和概率是**基于有限上下文的模型估计**，不代表对方的真实想法，也不保证回复效果。上游 `should_reply_now` 关注下一条回复是否应包含实质内容，不是自动发送或立即发送的指令。自动回复的适用条件、限制和验证状态见[1.3.0 发行说明](docs/releases/1.3.0.md)。
 
 ## 三种数据来源，三个范围
 
@@ -138,6 +144,9 @@ flowchart LR
     R --> U
     U --> P[复制 / 核验后填入输入框]
     P --> H[用户检查并手动发送]
+    U --> A[白名单内的新来信触发可选自动回复]
+    A --> V[重新核验可见会话与输入框]
+    V --> X[受限按键发送并标注知弦生成]
 ```
 
 界面使用 PySide6、QtWebEngine 和本地 HTML/CSS/JS。采集、OCR、分页读取和模型请求在后台执行。普通文字分析只提交选定文本；显式媒体处理会按所选模式处理真实图片或音频。
