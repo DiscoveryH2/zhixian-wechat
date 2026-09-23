@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -160,7 +161,7 @@ class CatalogMergeRegressions(unittest.TestCase):
         for source, query in (('all', 'Different'), ('collected', 'Synthetic')):
             with self.subTest(source=source), self.assertRaises(ValueError):
                 self.ctrl._read_catalog_cursor(cursor, source, query)
-        self.ctrl.catalog_cursors[cursor] = (0, self.ctrl.catalog_cursors[cursor][1])
+        self.ctrl.catalog_cursors[cursor] = (time.monotonic() - 601, self.ctrl.catalog_cursors[cursor][1])
         with self.assertRaises(ValueError):
             self.ctrl._read_catalog_cursor(cursor, 'all', 'Synthetic')
 
