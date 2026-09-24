@@ -104,6 +104,7 @@ class CaptureService:
         self._wf_loaded = set()
         self._config_revision = 0
         self._control_epoch = 0
+        self._last_wechat_foreground_at = 0.0
 
     def _send_audit(self, stage, task, status=""):
         """Record sender provenance without retaining titles, drafts or keys."""
@@ -306,7 +307,8 @@ class CaptureService:
 
     def _read_frame(self, full, at, emit=True):
         from app.capture import chat_area
-        from app.ocr import Reader, read_title
+        from app.ocr import Reader, read_title, sidebar_tail_matches
+        from app.winapi import libraries
         area = chat_area(full)
         if area is None:
             self._active_title = ""
@@ -327,12 +329,25 @@ class CaptureService:
         history = self._histories.setdefault(sid, ScreenHistory(sid))
         lines = reader.read(full[y0:y1, x0:x1], bg)
         messages, historical = history.update(lines)
+        baseline_verified = sidebar_tail_matches(full, area, lines, min_body_chars=2) if messages else False
+        tail_verified = baseline_verified and len(re.sub(r'\s+', '', str(lines[-1][2]))) >= 4
+        u, _, _ = libraries()
+        foreground = u.GetForegroundWindow() == self._hwnd
+        if foreground:
+            self._last_wechat_foreground_at = at
+        # A background WeChat window cannot receive a user's scroll input. A
+        # two-second quiet period avoids treating a just-finished manual scroll
+        # as a newly advanced viewport after focus changes.
+        background_stable = not foreground and at - self._last_wechat_foreground_at > 2.0
         if threading.current_thread() is self._thread and not (self._wanted.is_set() or self._once.is_set()):
             return title, area[:4], at
         self._announce_session(sid, title, "ocr")
         if messages:
             self._emit("messages", {"session_id": sid, "title": title, "source": "ocr",
-                                    "messages": messages, "historical": historical})
+                                    "messages": messages, "historical": historical,
+                                    "background_stable": background_stable,
+                                    "tail_baseline_verified": baseline_verified,
+                                    "tail_verified": tail_verified})
         self._status("live", "正在读取当前微信聊天；截图仅在内存中处理", "ocr")
         return title, area[:4], at
 
@@ -365,14 +380,14 @@ class CaptureService:
 
     def _send_worker(self, task):
         from app.auto_send import send_verified, _press_enter, _assert_target
-        from app.ocr import Reader, _engine
+        from app.ocr import Reader, _engine, sidebar_tail_matches
         from app.winapi import libraries, window_title
         self._close_capture()
         self._ensure_capture()
         hwnd, native = self._hwnd, self._native_title
         reader = Reader()
 
-        def target_frame():
+        def target_frame(require_tail=True):
             if task['cancelled'].is_set() or self._stop.is_set() or task['epoch'] != self._control_epoch:
                 raise RuntimeError('自动发送已取消')
             full, at = self._frame(wait=2)
@@ -383,6 +398,12 @@ class CaptureService:
             chat = full[y0:y1, x0:x1]
             pane_bg = self._cap.area[4] if self._cap and self._cap.area else full[y0, x0]
             visible = [line for line in reader.read(chat, pane_bg) if line[0] in ('her', 'other', 'me')]
+            min_chars = 8 if task['expected_sender'] else 4
+            if require_tail and not sidebar_tail_matches(full, self._cap.area, visible,
+                                                          min_body_chars=min_chars):
+                raise RuntimeError('左侧最新消息摘要与当前聊天尾部无法核对，已拒绝发送')
+            if require_tail and (not visible or visible[-1][0] not in ('her', 'other')):
+                raise RuntimeError('当前聊天已有己方新消息，已拒绝重复回复')
             incoming = [line for line in visible if line[0] in ('her', 'other')]
             if not incoming or re.sub(r'\s+', '', incoming[-1][2]) != re.sub(r'\s+', '', task['expected_incoming']):
                 raise RuntimeError('当前窗口最后一条对方消息与待回复消息不同，已拒绝发送')
@@ -400,10 +421,10 @@ class CaptureService:
         def verify():
             return target_frame()[1]
 
-        def inspect_composer():
+        def inspect_composer(require_tail=True):
             deadline = time.monotonic() + 1.5
             while True:
-                full, area, at = target_frame()
+                full, area, at = target_frame(require_tail=require_tail)
                 # WGC continuously timestamps frames. Require a frame captured
                 # after this probe begins so a pre-paste image is never reused.
                 if time.monotonic() - at < .12:
@@ -447,16 +468,19 @@ class CaptureService:
         # a matching outgoing bubble; otherwise keep the result uncertain.
         try:
             time.sleep(.35)
-            full, area, _ = target_frame()
+            full, area, _ = target_frame(require_tail=False)
             x0, y0, x1, y1 = area
             chat = full[y0:y1, x0:x1]
             pane_bg = self._cap.area[4] if self._cap and self._cap.area else full[y0, x0]
             outgoing = [line for line in reader.read(chat, pane_bg) if line[0] == 'me']
-            composer = inspect_composer()
+            composer = inspect_composer(require_tail=False)
             if outgoing and re.sub(r'\s+', '', outgoing[-1][2]) == re.sub(r'\s+', '', task['text']) and not composer['text']:
                 result = {'success': True, 'status': 'sent', 'message': '已在当前微信会话确认新发出的文字气泡'}
-        except Exception:
-            pass
+        except Exception as exc:
+            try:
+                self._send_audit('confirm_failed', task, type(exc).__name__)
+            except OSError:
+                pass
         try:
             self._send_audit('send_result', task, result.get('status', 'unconfirmed'))
         except OSError:

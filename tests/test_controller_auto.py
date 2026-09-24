@@ -40,7 +40,8 @@ class AutoControllerTests(unittest.TestCase):
 
     def _incoming(self, ident='msg-new', text='Can we discuss the draft?'):
         self.ctrl._on_capture('messages', {'session_id': self.sid, 'title': 'Synthetic contact',
-            'source': 'ocr', 'historical': False, 'messages': [{
+            'source': 'ocr', 'historical': False,
+            'tail_baseline_verified': True, 'tail_verified': True, 'messages': [{
                 'id': ident, 'side': 'other', 'sender': 'Synthetic contact', 'kind': 'text',
                 'text': text, 'source': 'ocr', 'historical': False, 'timestamp': None}]})
 
@@ -190,7 +191,7 @@ class AutoControllerTests(unittest.TestCase):
         self.ctrl.handle('configure_auto_reply', {'allowlist': [
             {'session_id': self.sid, 'type': 'group'}], 'group_mode': 'all'})
         self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})
-        self._incoming(ident='group-2')
+        self._incoming(ident='group-2', text='Can this group test be answered?')
         self.assertEqual(self.ctrl.auto_trigger['message']['id'], 'group-2')
 
     def test_group_all_skips_when_typed_confidence_is_low(self):
@@ -208,6 +209,18 @@ class AutoControllerTests(unittest.TestCase):
             self._drain(lambda: bool(self.ctrl.auto_recent))
         self.capture_type.return_value.send.assert_not_called()
         self.assertEqual(self.ctrl.auto_recent[-1]['status'], 'skipped')
+
+    def test_group_short_or_repeated_ocr_text_never_starts_auto_send(self):
+        self.ctrl.handle('configure_auto_reply', {'allowlist': [
+            {'session_id': self.sid, 'type': 'group'}], 'group_mode': 'all'})
+        self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})
+        self._incoming(ident='short-group', text='能用吗')
+        self.assertIsNone(self.ctrl.auto_trigger)
+        self._incoming(ident='long-group', text='请问这个功能现在能用吗？')
+        self.assertEqual(self.ctrl.auto_trigger['message']['id'], 'long-group')
+        self._incoming(ident='repeat-group', text='请问这个功能现在能用吗？')
+        self.assertIsNone(self.ctrl.auto_trigger)
+        self.capture_type.return_value.send.assert_not_called()
 
     def test_emergency_stop_invalidates_inflight_analysis(self):
         self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})
@@ -243,6 +256,35 @@ class AutoControllerTests(unittest.TestCase):
             'source': 'ocr', 'historical': True, 'messages': [{
                 'id': 'different-viewport', 'side': 'other', 'sender': 'Synthetic contact',
                 'text': 'Unrelated old context', 'source': 'ocr', 'historical': True}]})
+        self.assertTrue(self.ctrl.auto_paused)
+        self.assertIsNone(self.ctrl.auto_trigger)
+        self.capture_type.return_value.send.assert_not_called()
+
+    def test_stable_background_viewport_rebases_without_sending_old_batch(self):
+        self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})
+        self._incoming(ident='before-gap')
+        self.assertIsNotNone(self.ctrl.auto_trigger)
+        self.ctrl._on_capture('messages', {'session_id': self.sid, 'title': 'Synthetic contact',
+            'source': 'ocr', 'historical': True, 'background_stable': True,
+            'tail_baseline_verified': True, 'tail_verified': True, 'messages': [
+                {'id': 'new-baseline-1', 'side': 'me', 'text': 'Visible self context',
+                 'source': 'ocr', 'historical': True},
+                {'id': 'new-baseline-2', 'side': 'other', 'sender': 'Synthetic contact',
+                 'text': 'Visible incoming baseline', 'source': 'ocr', 'historical': True}]})
+        self.assertFalse(self.ctrl.auto_paused)
+        self.assertIsNone(self.ctrl.auto_trigger)
+        self.assertEqual(self.ctrl.sessions[self.sid]['messages'][-1]['id'], 'new-baseline-2')
+        self.capture_type.return_value.send.assert_not_called()
+        self._incoming(ident='after-gap', text='A newer question?')
+        self.assertEqual(self.ctrl.auto_trigger['message']['id'], 'after-gap')
+
+    def test_partial_overlap_scroll_without_tail_anchor_pauses(self):
+        self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})
+        self.ctrl._on_capture('messages', {'session_id': self.sid, 'title': 'Synthetic contact',
+            'source': 'ocr', 'historical': False, 'tail_baseline_verified': False,
+            'tail_verified': False, 'messages': [{
+                'id': 'old-scrolled-bubble', 'side': 'other', 'sender': 'Synthetic contact',
+                'text': 'An older unrelated message', 'source': 'ocr', 'historical': False}]})
         self.assertTrue(self.ctrl.auto_paused)
         self.assertIsNone(self.ctrl.auto_trigger)
         self.capture_type.return_value.send.assert_not_called()

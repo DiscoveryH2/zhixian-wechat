@@ -96,7 +96,8 @@ class SafetyTests(unittest.TestCase):
         fake_frame = Mock()
         fake_frame.__getitem__ = Mock(return_value=object())
         capture_module = types.SimpleNamespace(chat_area=lambda _: (1, 2, 3, 4, 0, 0))
-        ocr_module = types.SimpleNamespace(Reader=Mock(), read_title=lambda _: "")
+        ocr_module = types.SimpleNamespace(Reader=Mock(), read_title=lambda _: "",
+                                           sidebar_tail_matches=lambda *args, **kwargs: False)
         with patch.dict(sys.modules, {"app.capture": capture_module, "app.ocr": ocr_module}):
             with self.assertRaisesRegex(RuntimeError, "无法识别会话标题"):
                 service._read_frame(fake_frame, time.monotonic())
@@ -178,6 +179,61 @@ class SyntheticOcrTests(unittest.TestCase):
         lines = Reader().read(np.array(pane), np.array([245, 245, 245]))
         self.assertTrue(any(w == "her" and "开会" in text for w, _, text, _ in lines), lines)
         self.assertTrue(any(w == "me" and "回复" in text for w, _, text, _ in lines), lines)
+
+
+class SidebarTailTests(unittest.TestCase):
+    """Synthetic pixels and mocked OCR; this never reads a desktop frame."""
+
+    @staticmethod
+    def _row(y, text, confidence=.99):
+        return ([[80, y], [180, y], [180, y + 12], [80, y + 12]], text, confidence)
+
+    def _check(self, body="最新消息正文", preview=None, sender=None, sidebar_time="14:00",
+               chat_time="13:55", min_body_chars=4):
+        import numpy as np
+        from datetime import datetime
+        from app import ocr
+
+        full = np.full((400, 800, 3), 245, dtype=np.uint8)
+        # One synthetic selected-chat band in the sidebar.
+        full[110:155, 72:400] = (40, 180, 80)
+        area = (400, 80, 780, 380)
+        headline = [self._row(8, sidebar_time)]
+        if sender:
+            headline.append(self._row(22, f"{sender}:"))
+        headline.append(self._row(38, body if preview is None else preview))
+        pane_rows = [self._row(30, chat_time)]
+
+        def fake_engine(image, use_cls=False):
+            if image.shape[1] == 328:
+                return headline, None
+            return pane_rows, None
+
+        lines = [("her", sender, body, 200)]
+        with patch.object(ocr, "_engine", return_value=fake_engine):
+            return ocr.sidebar_tail_matches(
+                full, area, lines, now=datetime(2026, 9, 24, 14, 2),
+                min_body_chars=min_body_chars)
+
+    def test_selected_preview_and_recent_chat_time_anchor_match(self):
+        self.assertTrue(self._check())
+
+    def test_rejects_old_or_nonmatching_sidebar_preview(self):
+        self.assertFalse(self._check(sidebar_time="13:54"))
+        self.assertFalse(self._check(preview="另一条完全不同的内容"))
+
+    def test_rejects_short_body_by_default_but_allows_explicit_two_char_mode(self):
+        self.assertFalse(self._check(body="好的", min_body_chars=4))
+        # A two-character body can pass only with matching selected preview,
+        # fresh timestamps, and the normal speaker checks in place.
+        self.assertTrue(self._check(body="好的", min_body_chars=2))
+
+    def test_rejects_stale_chat_timestamp_and_wrong_sender(self):
+        self.assertFalse(self._check(chat_time="13:40"))
+        self.assertFalse(self._check(sender="Alice", preview="Bob: 最新消息正文"))
+
+    def test_group_count_prefix_does_not_break_sender_match(self):
+        self.assertTrue(self._check(sender="Alice", preview="[4条]Alice: 最新消息正文"))
 
 
 class OneShotTests(unittest.TestCase):

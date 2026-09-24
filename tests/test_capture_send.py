@@ -17,6 +17,28 @@ from desk.weflow import normalize_message
 
 
 class SendQueueTests(unittest.TestCase):
+    def test_new_outgoing_bubble_blocks_a_stale_auto_reply(self):
+        service = CaptureService(lambda *_: None)
+        service._hwnd, service._native_title = 123, 'WeChat'
+        service._cap = SimpleNamespace(area=(0, 0, 300, 150, np.zeros(3, dtype=np.uint8), 0))
+        frame = np.zeros((300, 300, 3), dtype=np.uint8)
+        task = {'mode': 'send', 'text': 'Synthetic reply', 'title': 'Synthetic group',
+                'expected_incoming': 'Synthetic question', 'expected_sender': '',
+                'expected_previous': '', 'cancelled': threading.Event(),
+                'epoch': service._control_epoch}
+        with patch.object(service, '_close_capture'), patch.object(service, '_ensure_capture'), \
+             patch.object(service, '_frame', side_effect=lambda wait=0: (frame, time.monotonic())), \
+             patch.object(service, '_read_frame', side_effect=lambda *_a, **_k: ('Synthetic group', (0, 0, 300, 150), time.monotonic())), \
+             patch('app.ocr.Reader') as reader, patch('app.ocr.sidebar_tail_matches', return_value=True), \
+             patch('app.winapi.window_title', return_value='WeChat'), \
+             patch('app.auto_send.send_verified') as sender:
+            reader.return_value.read.return_value = [
+                ('her', 'Synthetic member', 'Synthetic question', 10),
+                ('me', None, 'Already answered', 20)]
+            with self.assertRaisesRegex(RuntimeError, '己方新消息'):
+                service._send_worker(task)
+        sender.assert_not_called()
+
     def test_send_worker_audits_its_own_enter_call(self):
         with tempfile.TemporaryDirectory() as root:
             audit = Path(root) / 'send-audit.jsonl'
@@ -28,23 +50,29 @@ class SendQueueTests(unittest.TestCase):
                     'expected_incoming': 'Synthetic question', 'expected_sender': 'Synthetic member',
                     'expected_previous': '', 'cancelled': threading.Event(),
                     'epoch': service._control_epoch}
+            pressed = {'done': False}
 
             def fake_sender(*args, **kwargs):
                 kwargs['press_send']()
+                pressed['done'] = True
                 return {'success': True, 'status': 'sent_unconfirmed'}
 
             with patch.object(service, '_close_capture'), patch.object(service, '_ensure_capture'), \
                  patch.object(service, '_frame', side_effect=lambda wait=0: (frame, time.monotonic())), \
                  patch.object(service, '_read_frame', side_effect=lambda *_a, **_k: ('Synthetic group', (0, 0, 300, 150), time.monotonic())), \
                  patch('app.ocr.Reader') as reader, patch('app.ocr._engine') as engine, \
+                 patch('app.ocr.sidebar_tail_matches', return_value=True), \
                  patch('app.winapi.libraries') as libraries, patch('app.winapi.window_title', return_value='WeChat'), \
                  patch('app.auto_send._assert_target'), patch('app.auto_send._press_enter') as enter, \
                  patch('app.auto_send.send_verified', side_effect=fake_sender):
-                reader.return_value.read.return_value = [('her', 'Synthetic member', 'Synthetic question', 10)]
+                reader.return_value.read.side_effect = lambda *_args: (
+                    [('her', 'Synthetic member', 'Synthetic question', 10),
+                     ('me', None, 'Synthetic reply', 20)] if pressed['done'] else
+                    [('her', 'Synthetic member', 'Synthetic question', 10)])
                 engine.return_value.return_value = ([], None)
-                libraries.return_value[0].GetForegroundWindow.return_value = 123
+                libraries.return_value = (SimpleNamespace(GetForegroundWindow=lambda: 123), None, None)
                 result = service._send_worker(task)
-            self.assertEqual(result['status'], 'sent_unconfirmed')
+            self.assertEqual(result['status'], 'sent', audit.read_text(encoding='utf-8'))
             enter.assert_called_once_with()
             stages = [json.loads(line)['stage'] for line in audit.read_text(encoding='utf-8').splitlines()]
             self.assertEqual(stages, ['before_enter', 'enter_called', 'send_result'])

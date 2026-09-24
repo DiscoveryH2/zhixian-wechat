@@ -299,11 +299,32 @@ class Controller(QObject):
         if chosen['type'] == 'group' and not str(message.get('sender') or '').strip():
             self.auto_detail = '群聊发言人无法核对，未自动回复。'
             return None
+        if capture_event.get('source') == 'ocr':
+            if capture_event.get('tail_baseline_verified') is not True:
+                self._cancel_auto_work()
+                self.auto_paused = True
+                self.auto_detail = '微信左侧最新摘要与聊天尾部失去对齐，自动回复已暂停。'
+                self._save_auto_state()
+                return None
+            if capture_event.get('tail_verified') is not True:
+                self.auto_detail = '最新文字过短，未通过自动回复尾部核验；继续等待。'
+                return None
+            if chosen['type'] == 'group' and len(re.sub(r'\s+', '', str(message.get('text') or ''))) < 8:
+                self.auto_detail = '群聊消息过短，无法排除相似旧消息，本轮未自动发送。'
+                return None
+            text_key = re.sub(r'\s+', '', str(message.get('text') or ''))
+            if any(m.get('side') == 'other' and m.get('sender') == message.get('sender') and
+                   re.sub(r'\s+', '', str(m.get('text') or '')) == text_key
+                   for m in session.get('messages', [])[:-1][-100:]):
+                self.auto_detail = '近期出现相同发言人和内容，无法可靠去重，本轮未自动发送。'
+                return None
         if self.auto_send_busy:
             # Coalesce a burst to its newest incoming turn. The send completion
             # will recheck that this is still the latest message before judging.
             self.auto_deferred = {'session_id': sid, 'message_id': message['id'],
                                   'source': capture_event.get('source'),
+                                  'tail_baseline_verified': capture_event.get('tail_baseline_verified'),
+                                  'tail_verified': capture_event.get('tail_verified'),
                                   'observed_at': time.time()}
             self.auto_detail = '发送中收到新消息；完成后将重新核对最新一轮。'
             return None
@@ -442,6 +463,8 @@ class Controller(QObject):
             return
         delay = self._auto_observe(session, message, {
             'source': deferred['source'], 'historical': False,
+            'tail_baseline_verified': deferred.get('tail_baseline_verified'),
+            'tail_verified': deferred.get('tail_verified'),
             'observed_at': deferred['observed_at']})
         if delay is not None:
             self.pending = sid
@@ -1442,13 +1465,33 @@ class Controller(QObject):
                 initial_allowed = self.allow_initial
                 self.allow_initial = False
                 # OCR cannot distinguish an entirely different viewport from scrolled-back
-                # history. Never append such a batch as the newest conversation context.
+                # history while WeChat is foreground. When it has stayed in the
+                # background, the user could not have scrolled it: take this
+                # batch as a new baseline, but never send for that batch.
                 if historical and session['messages'] and data.get('source') == 'ocr' and not initial_allowed:
                     if self.auto_policy['enabled'] and ident in self.auto_policy['session_ids']:
                         self._cancel_auto_work()
-                        self.auto_paused = True
-                        self.auto_detail = '当前 OCR 会话视口出现无法对齐的旧记录或切换，自动回复已暂停。'
+                        if data.get('background_stable') is True and data.get('tail_baseline_verified') is True:
+                            baseline = []
+                            for row in data.get('messages', []):
+                                message = dict(row)
+                                message['text'] = str(message.get('text') or '')[:16000]
+                                message['historical'] = True
+                                baseline.append(message)
+                            if baseline:
+                                session['messages'] = baseline[-500:]
+                                session['updated'] = time.time()
+                                self.store.save_history([s for s in self.sessions.values() if s.get('source') != 'import'])
+                                self.auto_detail = '后台微信视口已重新建立基线；这一批未发送，继续等待新消息。'
+                                self._auto_record(ident, 'skipped', 'OCR 视口重新建立基线，本批未发送')
+                            else:
+                                self.auto_paused = True
+                                self.auto_detail = '当前 OCR 视口无法可靠识别，自动回复已暂停。'
+                        else:
+                            self.auto_paused = True
+                            self.auto_detail = '当前 OCR 会话视口出现无法对齐的旧记录或切换，自动回复已暂停。'
                         self._save_auto_state()
+                    self._sync_hub()
                     self.emit()
                     return
                 known = {m['id'] for m in session['messages']}
@@ -1476,6 +1519,8 @@ class Controller(QObject):
                 auto_delay = None
                 if added and added[-1].get('side') == 'other' and cfg['api_key'] and not historical:
                     auto_delay = self._auto_observe(session, added[-1], data)
+                    if auto_delay is None and self.auto_trigger and self.auto_trigger['session_id'] == ident:
+                        self.auto_trigger = None
                 if (added and added[-1].get('side') == 'other' and cfg['api_key']
                         and ((cfg['auto_analyze'] and (not historical or initial_allowed)) or auto_delay is not None)):
                     self.pending = ident
