@@ -82,7 +82,7 @@ jobs:
             const tag = `v${version}`;
             // Automatic sending remains a preview until a real incoming-message
             // smoke test confirms the current Windows/WeChat composer path.
-            const prerelease = ['1.3.0', '1.4.0', '1.4.1', '1.4.2', '1.4.3', '1.4.4', '1.5.0', '1.5.1'].includes(version);
+            const prerelease = ['1.3.0', '1.4.0', '1.4.1', '1.4.2', '1.4.3', '1.4.4', '1.5.0', '1.5.1', '1.5.2'].includes(version);
             const { owner, repo } = context.repo;
             const notesFile = path.join('docs', 'releases', `${version}.md`);
             const releaseBody = fs.existsSync(notesFile)

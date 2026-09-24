@@ -16,7 +16,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QFileDialog
 
-from .store import Store, _atomic, _load
+from .store import Store, _atomic, _load, normalize_title
 from .auto_reply import AutoReplyGuard
 from .imports import ChatLabImporter
 from .datahub import DataHub
@@ -212,11 +212,23 @@ class Controller(QObject):
             if not isinstance(raw, dict):
                 raise ValueError('自动回复会话配置无效。')
             sid = str(raw.get('session_id') or '')[:256]
-            if not sid or sid in seen:
+            if not sid:
                 continue
-            with self.catalog_lock:
-                meta = copy.deepcopy(self.catalog_items.get(sid))
-            meta = meta or copy.deepcopy(self.sessions.get(sid))
+            legacy = next((item for item in self.auto_allowlist if item['session_id'] == sid
+                           and item.get('source') == 'ocr'), None)
+            if legacy and self.store.config['source'] == 'wechat_db':
+                meta = self._migrate_ocr_auto_target(legacy)
+                sid = meta['id']
+            else:
+                with self.catalog_lock:
+                    meta = copy.deepcopy(self.catalog_items.get(sid))
+                meta = meta or copy.deepcopy(self.sessions.get(sid))
+                saved = next((item for item in self.auto_allowlist if item['session_id'] == sid
+                              and item.get('source') == 'wechat_db'), None)
+                if not meta and saved and self.store.config['source'] == 'wechat_db':
+                    meta = self._verify_saved_db_auto_target(saved)
+            if sid in seen:
+                continue
             if not meta or meta.get('source') not in ('ocr', 'weflow', 'wechat_db'):
                 raise ValueError('自动回复只能选择实时微信会话，不能选择导入归档。')
             if meta.get('source') == 'ocr' and (sid != self.live_id or self.status['capture'] != 'live'):
@@ -250,6 +262,60 @@ class Controller(QObject):
         self.emit()
         return self._auto_public()
 
+    def _migrate_ocr_auto_target(self, legacy):
+        """Upgrade one old title-only OCR allowlist entry to a unique DB ID."""
+        title = str(legacy.get('title') or '').strip()
+        expected_type = legacy.get('type')
+        if not title or expected_type not in ('private', 'group'):
+            raise ValueError('旧 OCR 名单缺少会话名称或类型，请从数据库会话目录重新选择。')
+        try:
+            source = self._wechat_db_reader()
+            matches, offset = [], 0
+            while offset < 100000:
+                page = source.sessions(limit=500, offset=offset)
+                matches.extend(item for item in page
+                               if item.get('type') == expected_type
+                               and normalize_title(item.get('name')) == normalize_title(title))
+                if len(matches) > 1:
+                    break
+                offset += len(page)
+                if len(page) < 500:
+                    break
+        except Exception:
+            raise ValueError('无法核验旧 OCR 名单，请从数据库会话目录重新选择。') from None
+        if len(matches) != 1:
+            raise ValueError('旧 OCR 名单无法唯一对应数据库会话，请从数据库会话目录重新选择。')
+        item = matches[0]
+        migrated = {'id': item['id'], 'title': item.get('name') or title,
+                    'type': expected_type, 'source': 'wechat_db', 'talker': item['id']}
+        self._remember_catalog([migrated])
+        return migrated
+
+    def _verify_saved_db_auto_target(self, saved):
+        """Resolve a persisted DB allowlist ID after a fresh app launch."""
+        ident = str(saved.get('session_id') or '')
+        expected_type = saved.get('type')
+        if not ident or expected_type not in ('private', 'group'):
+            raise ValueError('数据库自动回复名单无效，请重新选择会话。')
+        try:
+            source = self._wechat_db_reader()
+            matches, offset = [], 0
+            while offset < 100000:
+                page = source.sessions(limit=500, offset=offset)
+                matches.extend(item for item in page if item.get('id') == ident)
+                offset += len(page)
+                if len(page) < 500:
+                    break
+        except Exception:
+            raise ValueError('无法核验数据库自动回复名单，请重新选择会话。') from None
+        if len(matches) != 1 or matches[0].get('type') != expected_type:
+            raise ValueError('数据库自动回复名单已过期，请重新选择会话。')
+        item = matches[0]
+        meta = {'id': ident, 'title': item.get('name') or ident,
+                'type': expected_type, 'source': 'wechat_db', 'talker': ident}
+        self._remember_catalog([meta])
+        return meta
+
     def _start_auto(self, params):
         if self.auto_integrity_error:
             raise ValueError('自动回复去重或限额状态损坏；请重新保存名单并重启应用后再启用。')
@@ -264,6 +330,8 @@ class Controller(QObject):
             raise ValueError('请先在设置中启用已连接的 WeFlow 消息来源。')
         if source == 'wechat_db' and self.store.config['source'] != 'wechat_db':
             raise ValueError('请先在设置中启用本机微信数据库来源。')
+        if source == 'ocr' and self.store.config['source'] == 'wechat_db':
+            raise ValueError('旧 OCR 名单尚未迁移，请重新保存自动回复名单。')
         if source == 'ocr' and (self.auto_allowlist[0]['session_id'] != self.live_id or self.status['capture'] != 'live'):
             raise ValueError('请让已选的 OCR 会话保持在当前可见的微信窗口。')
         from core.client import resolve_decision, resolve_reply

@@ -16,6 +16,72 @@ APP = QApplication.instance() or QApplication([])
 
 
 class ControllerDBAutoTests(unittest.TestCase):
+    def test_saved_database_allowlist_starts_after_catalog_cache_is_empty(self):
+        with tempfile.TemporaryDirectory() as temp, patch("desk.capture_service.CaptureService"):
+            ctrl = Controller(Path(temp))
+            try:
+                ctrl.store.config['source'] = 'wechat_db'
+                saved = {'session_id': 'room@chatroom', 'title': '合成群聊',
+                         'type': 'group', 'source': 'wechat_db'}
+                ctrl.auto_allowlist = [saved]
+                self.assertNotIn('room@chatroom', ctrl.catalog_items)
+                class Reader:
+                    def sessions(self, limit=500, offset=0):
+                        return ([{'id': 'room@chatroom', 'name': '合成群聊', 'type': 'group'}]
+                                if offset == 0 else [])
+                with patch.object(ctrl, '_wechat_db_reader', return_value=Reader()):
+                    ctrl._configure_auto({'allowlist': [saved], 'group_mode': 'mention_only'})
+                self.assertEqual(ctrl.auto_allowlist[0]['session_id'], 'room@chatroom')
+                self.assertEqual(ctrl.auto_allowlist[0]['source'], 'wechat_db')
+            finally:
+                ctrl.close()
+
+    def test_old_ocr_group_allowlist_migrates_to_unique_database_session(self):
+        with tempfile.TemporaryDirectory() as temp, patch("desk.capture_service.CaptureService"):
+            ctrl = Controller(Path(temp))
+            try:
+                ctrl.store.config['source'] = 'wechat_db'
+                old = {'session_id': 'ocr:synthetic', 'title': '合成群聊 (12)',
+                       'type': 'group', 'source': 'ocr'}
+                ctrl.auto_allowlist = [old]
+                class Reader:
+                    def sessions(self, limit=500, offset=0):
+                        return ([{'id': 'room@chatroom', 'name': '合成群聊', 'type': 'group'}]
+                                if offset == 0 else [])
+                with patch.object(ctrl, '_wechat_db_reader', return_value=Reader()):
+                    ctrl._configure_auto({'allowlist': [old], 'group_mode': 'mention_only'})
+                self.assertEqual(ctrl.auto_allowlist[0]['session_id'], 'room@chatroom')
+                self.assertEqual(ctrl.auto_allowlist[0]['source'], 'wechat_db')
+                self.assertFalse(ctrl.auto_policy['enabled'])
+                ctrl.store.secrets['api_key'] = 'synthetic-test-key'
+                ctrl.status['capture'] = 'live'
+                with patch('core.client.resolve_decision', return_value=object()), \
+                     patch('core.client.resolve_reply', return_value=object()):
+                    started = ctrl._start_auto({'acknowledge_send': True})
+                self.assertTrue(started['enabled'])
+            finally:
+                ctrl.close()
+
+    def test_ambiguous_old_ocr_title_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp, patch("desk.capture_service.CaptureService"):
+            ctrl = Controller(Path(temp))
+            try:
+                ctrl.store.config['source'] = 'wechat_db'
+                old = {'session_id': 'ocr:synthetic', 'title': '合成群聊',
+                       'type': 'group', 'source': 'ocr'}
+                ctrl.auto_allowlist = [old]
+                class Reader:
+                    def sessions(self, limit=500, offset=0):
+                        return ([{'id': 'a@chatroom', 'name': '合成群聊', 'type': 'group'},
+                                 {'id': 'b@chatroom', 'name': '合成群聊', 'type': 'group'}]
+                                if offset == 0 else [])
+                with patch.object(ctrl, '_wechat_db_reader', return_value=Reader()):
+                    with self.assertRaisesRegex(ValueError, '无法唯一对应'):
+                        ctrl._configure_auto({'allowlist': [old]})
+                self.assertEqual(ctrl.auto_allowlist, [old])
+            finally:
+                ctrl.close()
+
     def test_direct_group_at_uses_normal_confidence_gate(self):
         with tempfile.TemporaryDirectory() as temp, patch("desk.capture_service.CaptureService") as capture_type:
             ctrl = Controller(Path(temp))
