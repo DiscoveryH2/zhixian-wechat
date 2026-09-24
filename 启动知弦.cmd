@@ -1,6 +1,8 @@
 @echo off
 cd /d "%~dp0"
-if exist "outputs\build-v1.4.4\Zhixian\Zhixian.exe" (
+if exist "outputs\build-v1.5.0\Zhixian\Zhixian.exe" (
+  start "" "outputs\build-v1.5.0\Zhixian\Zhixian.exe" --data-dir "%~dp0data"
+) else if exist "outputs\build-v1.4.4\Zhixian\Zhixian.exe" (
   start "" "outputs\build-v1.4.4\Zhixian\Zhixian.exe" --data-dir "%~dp0data"
 ) else if exist "outputs\build-v1.4.3\Zhixian\Zhixian.exe" (
   start "" "outputs\build-v1.4.3\Zhixian\Zhixian.exe" --data-dir "%~dp0data"
