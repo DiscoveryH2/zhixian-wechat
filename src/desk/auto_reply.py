@@ -238,10 +238,11 @@ class AutoReplyGuard:
             return Decision(False, "unknown_session_type")
         if _get(message, "side", default=None) != "other" or not str(_get(message, "text", default="") or "").strip():
             return Decision(False, "not_unanswered_inbound")
-        key = "backlog:" + self._message_key(sid, message, {})
-        if key == "backlog:":
+        live_key = self._message_key(sid, message, {})
+        key = "backlog:" + live_key
+        if not live_key:
             return Decision(False, "missing_event_identity")
-        if key in self._seen_set:
+        if key in self._seen_set or live_key in self._seen_set:
             return Decision(False, "duplicate_event")
         safe = self.assess_candidate(candidate, incoming_text)
         if not safe.allow:

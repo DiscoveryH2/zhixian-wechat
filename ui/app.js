@@ -52,7 +52,7 @@
   const pending = new Map();
   let bridge = null, counter = 0, page = 'workspace', compact = window.innerWidth <= 640, online = false, search = '', currentState;
   let renderQueued = false, experience = null, lastWorkspaceKey = null, lastAutoReplyKey = null;
-  const blank = () => ({ config: { base_url: '', model_name: '', has_api_key: false, reply_model: '', reply_base_url: '', has_reply_api_key: false, relationship: '朋友', style: '自然简洁', auto_analyze: true, context_limit: 30, save_history: false, always_on_top: false, source: 'ocr', weflow_url: 'http://127.0.0.1:5031', weflow_has_token: false, debounce_ms: 1800 }, status: { capture: 'idle', analysis: 'idle', detail: '等待开始读取微信', last_error: '', source: 'ocr', connected: false }, auto_reply: { enabled: false, paused: false, status: 'off', detail: '', allowlist: [], group_mode: 'mention_only', debounce_seconds: 4, cooldown_seconds: 45, hourly_limit: 8, daily_limit: 40, sent_hour: 0, sent_day: 0, recent: [] }, sessions: [], current_session: null, analysis: null, notes: [], contacts: [], version: '1.4.0' });
+  const blank = () => ({ config: { base_url: '', model_name: '', has_api_key: false, reply_model: '', reply_base_url: '', has_reply_api_key: false, relationship: '朋友', style: '自然简洁', auto_analyze: true, context_limit: 30, save_history: false, always_on_top: false, source: 'ocr', weflow_url: 'http://127.0.0.1:5031', weflow_has_token: false, debounce_ms: 1800 }, status: { capture: 'idle', analysis: 'idle', detail: '等待开始读取微信', last_error: '', source: 'ocr', connected: false }, auto_reply: { enabled: false, paused: false, status: 'off', detail: '', allowlist: [], group_mode: 'mention_only', debounce_seconds: 4, cooldown_seconds: 45, hourly_limit: 8, daily_limit: 40, sent_hour: 0, sent_day: 0, recent: [] }, sessions: [], current_session: null, analysis: null, notes: [], contacts: [], version: '1.4.1' });
   currentState = blank();
   const configured = () => currentState.config.has_api_key && currentState.config.base_url && currentState.config.model_name;
   const live = () => ['live', 'searching'].includes(currentState.status.capture);
@@ -140,7 +140,7 @@
     chip.className = `status-chip ${autoReplyLabel ? `auto-reply-chip ${autoReply.enabled && !autoReply.paused ? 'running' : autoReply.status === 'emergency' ? 'error' : ''}` : status.analysis === 'running' ? 'running' : status.capture === 'live' ? 'live' : status.capture === 'error' ? 'error' : ''}`;
     $('#footer-status').textContent = status.detail || '本地工作台已就绪';
     $('#footer-meta').textContent = currentState.config.model_name ? `${currentState.config.model_name} · ${sourceLabel(currentState.config.source)}` : 'Jev · 语境与判断';
-    $('#version').textContent = String(currentState.version || '1.4.0');
+    $('#version').textContent = String(currentState.version || '1.4.1');
     $('#demo-label').hidden = !demo;
     $('#mini-expand').hidden = !compact;
     renderNavigation();

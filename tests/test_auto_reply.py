@@ -138,6 +138,14 @@ class AutoReplyGuardTests(unittest.TestCase):
                                                 acknowledged=True, now=1100).reason,
                          "duplicate_event")
 
+    def test_backlog_cannot_resend_a_live_event_already_seen(self):
+        self.message['side'] = 'other'
+        self.assertTrue(self.observe().allow)
+        policy = dict(self.policy, enabled=False)
+        self.assertEqual(self.guard.claim_backlog(self.session, self.message, policy, '收到',
+                                                  acknowledged=True, now=1004).reason,
+                         'duplicate_event')
+
 
 if __name__ == "__main__":
     unittest.main()
