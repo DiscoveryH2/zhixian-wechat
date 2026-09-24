@@ -150,9 +150,15 @@ class Controller(QObject):
         now = time.time()
         sent = self.auto_guard.snapshot().get('sent', [])
         enabled = self.auto_policy['enabled']
-        status = 'off' if not enabled else 'paused' if self.auto_paused else 'running' if self.status['capture'] == 'live' else 'blocked'
+        visible_allowed = any(item['session_id'] == self.live_id for item in self.auto_allowlist)
+        waiting_for_target = enabled and not self.auto_paused and self.status['capture'] == 'live' and not visible_allowed
+        status = ('off' if not enabled else 'paused' if self.auto_paused else
+                  'running' if self.status['capture'] == 'live' and visible_allowed else 'blocked')
+        detail = ('微信当前显示的会话不在自动回复名单中；请切回允许会话并保持聊天尾部可见。'
+                  if waiting_for_target else self.auto_detail)
         return {'enabled': enabled, 'paused': self.auto_paused, 'status': status,
-                'detail': self.auto_detail, 'allowlist': copy.deepcopy(self.auto_allowlist),
+                'detail': detail, 'waiting_for_target': waiting_for_target,
+                'allowlist': copy.deepcopy(self.auto_allowlist),
                 'group_mode': self.auto_policy['group_mode'],
                 'debounce_seconds': self.auto_policy['debounce_seconds'],
                 'cooldown_seconds': self.auto_policy['cooldown_seconds'],
@@ -300,11 +306,11 @@ class Controller(QObject):
             self.auto_detail = '群聊发言人无法核对，未自动回复。'
             return None
         if capture_event.get('source') == 'ocr':
+            if capture_event.get('sidebar_changed') is not True:
+                self.auto_detail = '左侧会话摘要没有出现新的签名；滚动或旧消息不会触发自动回复。'
+                return None
             if capture_event.get('tail_baseline_verified') is not True:
-                self._cancel_auto_work()
-                self.auto_paused = True
-                self.auto_detail = '微信左侧最新摘要与聊天尾部失去对齐，自动回复已暂停。'
-                self._save_auto_state()
+                self.auto_detail = '新摘要无法与可见聊天尾部核对，跳过本轮并继续监听。'
                 return None
             if capture_event.get('tail_verified') is not True:
                 self.auto_detail = '最新文字过短，未通过自动回复尾部核验；继续等待。'
@@ -323,6 +329,8 @@ class Controller(QObject):
             # will recheck that this is still the latest message before judging.
             self.auto_deferred = {'session_id': sid, 'message_id': message['id'],
                                   'source': capture_event.get('source'),
+                                  'sidebar_changed': capture_event.get('sidebar_changed'),
+                                  'sidebar_signature': capture_event.get('sidebar_signature'),
                                   'tail_baseline_verified': capture_event.get('tail_baseline_verified'),
                                   'tail_verified': capture_event.get('tail_verified'),
                                   'observed_at': time.time()}
@@ -336,6 +344,7 @@ class Controller(QObject):
         source = capture_event.get('source')
         event = {'source': source, 'historical': bool(capture_event.get('historical')),
                  'incoming': True, 'live_visible': source == 'ocr' and sid == self.live_id,
+                 'sidebar_signature': capture_event.get('sidebar_signature') or '',
                  'timestamp': capture_event.get('observed_at') or time.time()}
         observed = self.auto_guard.observe(typed, message, event, {'auto_reply_enabled': True}, self.auto_policy)
         if not observed.allow:
@@ -408,7 +417,8 @@ class Controller(QObject):
         sender = trigger['message'].get('sender', '') if trigger['type'] == 'group' else ''
         try:
             future = self.pool.submit(self.capture.send, reply, session['title'],
-                                      trigger['message'].get('text', ''), sender, prior)
+                                      trigger['message'].get('text', ''), sender, prior,
+                                      trigger['event'].get('sidebar_signature', ''))
             future.add_done_callback(lambda done: self._emit_auto_send_done(sid, trigger['epoch'], done))
         except Exception:
             self.auto_send_busy = False
@@ -463,6 +473,8 @@ class Controller(QObject):
             return
         delay = self._auto_observe(session, message, {
             'source': deferred['source'], 'historical': False,
+            'sidebar_changed': deferred.get('sidebar_changed'),
+            'sidebar_signature': deferred.get('sidebar_signature'),
             'tail_baseline_verified': deferred.get('tail_baseline_verified'),
             'tail_verified': deferred.get('tail_verified'),
             'observed_at': deferred['observed_at']})
@@ -1464,14 +1476,15 @@ class Controller(QObject):
                 historical = bool(data.get('historical', False))
                 initial_allowed = self.allow_initial
                 self.allow_initial = False
-                # OCR cannot distinguish an entirely different viewport from scrolled-back
-                # history while WeChat is foreground. When it has stayed in the
-                # background, the user could not have scrolled it: take this
-                # batch as a new baseline, but never send for that batch.
+                # A missing bubble overlap alone is ambiguous: scrolling old
+                # records can look like fresh messages. The selected sidebar
+                # preview changes only when that chat receives a new latest
+                # message. Require that change plus a verified visible tail;
+                # otherwise quarantine this batch and keep listening.
                 if historical and session['messages'] and data.get('source') == 'ocr' and not initial_allowed:
                     if self.auto_policy['enabled'] and ident in self.auto_policy['session_ids']:
                         self._cancel_auto_work()
-                        if data.get('background_stable') is True and data.get('tail_baseline_verified') is True:
+                        if data.get('sidebar_changed') is True and data.get('tail_baseline_verified') is True:
                             baseline = []
                             for row in data.get('messages', []):
                                 message = dict(row)
@@ -1482,15 +1495,21 @@ class Controller(QObject):
                                 session['messages'] = baseline[-500:]
                                 session['updated'] = time.time()
                                 self.store.save_history([s for s in self.sessions.values() if s.get('source') != 'import'])
-                                self.auto_detail = '后台微信视口已重新建立基线；这一批未发送，继续等待新消息。'
-                                self._auto_record(ident, 'skipped', 'OCR 视口重新建立基线，本批未发送')
-                            else:
-                                self.auto_paused = True
-                                self.auto_detail = '当前 OCR 视口无法可靠识别，自动回复已暂停。'
+                                self.auto_detail = '左侧摘要已更新且聊天尾部可核验，已重建当前屏上下文。'
+                                last = session['messages'][-1]
+                                if (data.get('tail_verified') is True and last.get('side') == 'other' and
+                                        self.store.secrets['api_key'] and not self.auto_paused):
+                                    last['historical'] = False
+                                    live_event = {**data, 'historical': False}
+                                    delay = self._auto_observe(session, last, live_event)
+                                    if delay is not None:
+                                        self.pending = ident
+                                        self.pending_manual = False
+                                        self.timer.start(max(self.store.config['debounce_ms'], delay))
                         else:
-                            self.auto_paused = True
-                            self.auto_detail = '当前 OCR 会话视口出现无法对齐的旧记录或切换，自动回复已暂停。'
+                            self.auto_detail = '当前屏与最新摘要无法共同确认新来信，本批跳过并继续监听。'
                         self._save_auto_state()
+                    self.status.update(capture='live', connected=True, last_error='')
                     self._sync_hub()
                     self.emit()
                     return

@@ -105,6 +105,7 @@ class CaptureService:
         self._config_revision = 0
         self._control_epoch = 0
         self._last_wechat_foreground_at = 0.0
+        self._sidebar_signatures = {}
 
     def _send_audit(self, stage, task, status=""):
         """Record sender provenance without retaining titles, drafts or keys."""
@@ -150,6 +151,8 @@ class CaptureService:
 
     def start(self, config):
         with self._lock:
+            if not self._wanted.is_set():
+                self._sidebar_signatures.clear()
             next_config = dict(config or {})
             next_config["source"] = "weflow" if next_config.get("source") == "weflow" else "ocr"
             self._config = next_config
@@ -214,7 +217,8 @@ class CaptureService:
             raise RuntimeError(task["error"])
         return task.get("result", {"success": False})
 
-    def send(self, text, session_title, expected_incoming, expected_sender="", expected_previous=""):
+    def send(self, text, session_title, expected_incoming, expected_sender="",
+             expected_previous="", expected_sidebar_signature=""):
         """Send only after a new on-screen target and composer check.
 
         This method never switches chats. If the target conversation is not
@@ -225,6 +229,7 @@ class CaptureService:
         task = {"mode": "send", "text": str(text), "title": str(session_title),
                 "expected_incoming": str(expected_incoming), "expected_sender": str(expected_sender or ''),
                 "expected_previous": str(expected_previous or ''),
+                "expected_sidebar_signature": str(expected_sidebar_signature or ''),
                 "done": threading.Event(), "cancelled": threading.Event(), "epoch": self._control_epoch}
         self._requests.put(task)
         self._ensure_thread()
@@ -307,7 +312,7 @@ class CaptureService:
 
     def _read_frame(self, full, at, emit=True):
         from app.capture import chat_area
-        from app.ocr import Reader, read_title, sidebar_tail_matches
+        from app.ocr import Reader, read_title, sidebar_latest_meta, sidebar_tail_matches
         from app.winapi import libraries
         area = chat_area(full)
         if area is None:
@@ -328,8 +333,15 @@ class CaptureService:
             reader = self._readers[title] = Reader()
         history = self._histories.setdefault(sid, ScreenHistory(sid))
         lines = reader.read(full[y0:y1, x0:x1], bg)
+        sidebar = sidebar_latest_meta(full, area, max_age_minutes=None)
+        previous_sidebar = self._sidebar_signatures.get(sid)
+        sidebar_changed = bool(sidebar and previous_sidebar and
+                               sidebar['signature'] != previous_sidebar)
+        if sidebar:
+            self._sidebar_signatures[sid] = sidebar['signature']
         messages, historical = history.update(lines)
-        baseline_verified = sidebar_tail_matches(full, area, lines, min_body_chars=2) if messages else False
+        baseline_verified = sidebar_tail_matches(full, area, lines, min_body_chars=2,
+                                                 meta=sidebar) if messages else False
         tail_verified = baseline_verified and len(re.sub(r'\s+', '', str(lines[-1][2]))) >= 4
         u, _, _ = libraries()
         foreground = u.GetForegroundWindow() == self._hwnd
@@ -346,6 +358,8 @@ class CaptureService:
             self._emit("messages", {"session_id": sid, "title": title, "source": "ocr",
                                     "messages": messages, "historical": historical,
                                     "background_stable": background_stable,
+                                    "sidebar_changed": sidebar_changed,
+                                    "sidebar_signature": sidebar['signature'] if sidebar else '',
                                     "tail_baseline_verified": baseline_verified,
                                     "tail_verified": tail_verified})
         self._status("live", "正在读取当前微信聊天；截图仅在内存中处理", "ocr")
@@ -380,7 +394,7 @@ class CaptureService:
 
     def _send_worker(self, task):
         from app.auto_send import send_verified, _press_enter, _assert_target
-        from app.ocr import Reader, _engine, sidebar_tail_matches
+        from app.ocr import Reader, _engine, sidebar_latest_meta, sidebar_tail_matches
         from app.winapi import libraries, window_title
         self._close_capture()
         self._ensure_capture()
@@ -399,8 +413,12 @@ class CaptureService:
             pane_bg = self._cap.area[4] if self._cap and self._cap.area else full[y0, x0]
             visible = [line for line in reader.read(chat, pane_bg) if line[0] in ('her', 'other', 'me')]
             min_chars = 8 if task['expected_sender'] else 4
+            meta = sidebar_latest_meta(full, self._cap.area) if require_tail else None
+            expected_signature = task.get('expected_sidebar_signature') or ''
+            if require_tail and expected_signature and (not meta or meta['signature'] != expected_signature):
+                raise RuntimeError('左侧最新消息已变化，已取消过期自动回复')
             if require_tail and not sidebar_tail_matches(full, self._cap.area, visible,
-                                                          min_body_chars=min_chars):
+                                                          min_body_chars=min_chars, meta=meta):
                 raise RuntimeError('左侧最新消息摘要与当前聊天尾部无法核对，已拒绝发送')
             if require_tail and (not visible or visible[-1][0] not in ('her', 'other')):
                 raise RuntimeError('当前聊天已有己方新消息，已拒绝重复回复')
@@ -613,6 +631,7 @@ class CaptureService:
                     self._wf_seen.clear()
                     self._wf_seen_order.clear()
                     self._wf_loaded.clear()
+                    self._sidebar_signatures.clear()
                     self._close_capture()
                 if self._restart.is_set():
                     self._restart.clear()

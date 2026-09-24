@@ -41,6 +41,7 @@ class AutoControllerTests(unittest.TestCase):
     def _incoming(self, ident='msg-new', text='Can we discuss the draft?'):
         self.ctrl._on_capture('messages', {'session_id': self.sid, 'title': 'Synthetic contact',
             'source': 'ocr', 'historical': False,
+            'sidebar_changed': True, 'sidebar_signature': 'sig-' + ident,
             'tail_baseline_verified': True, 'tail_verified': True, 'messages': [{
                 'id': ident, 'side': 'other', 'sender': 'Synthetic contact', 'kind': 'text',
                 'text': text, 'source': 'ocr', 'historical': False, 'timestamp': None}]})
@@ -105,7 +106,8 @@ class AutoControllerTests(unittest.TestCase):
             self.ctrl._run_pending()
             self._drain(lambda: self.ctrl.auto_recent and self.ctrl.auto_recent[-1]['status'] == 'sent')
         self.capture_type.return_value.send.assert_called_once_with(
-            'Yes, let us discuss it.' + AUTO_DISCLOSURE, 'Synthetic contact', 'Can we discuss the draft?', '', 'Prior context.')
+            'Yes, let us discuss it.' + AUTO_DISCLOSURE, 'Synthetic contact',
+            'Can we discuss the draft?', '', 'Prior context.', 'sig-msg-new')
         self.assertEqual(self.ctrl.snapshot()['auto_reply']['sent_hour'], 1)
         self.assertNotIn('Yes, let us discuss it.', str(self.ctrl.snapshot()['auto_reply']['recent']))
         self._incoming()  # same stable message ID is a replay, never a second send
@@ -248,46 +250,62 @@ class AutoControllerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})
 
-    def test_ambiguous_ocr_viewport_pauses_instead_of_rebinding_same_title(self):
+    def test_armed_sender_shows_blocked_when_visible_chat_is_not_allowed(self):
+        self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})
+        self.assertEqual(self.ctrl.snapshot()['auto_reply']['status'], 'running')
+        self.ctrl._on_capture('session', {'id': 'ocr:another', 'title': 'Another chat', 'source': 'ocr'})
+        state = self.ctrl.snapshot()['auto_reply']
+        self.assertEqual(state['status'], 'blocked')
+        self.assertTrue(state['waiting_for_target'])
+        self.capture_type.return_value.send.assert_not_called()
+
+    def test_unchanged_sidebar_old_batch_is_skipped_without_pausing(self):
         self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})
         self._incoming(ident='current-new')
         self.assertIsNotNone(self.ctrl.auto_trigger)
         self.ctrl._on_capture('messages', {'session_id': self.sid, 'title': 'Synthetic contact',
-            'source': 'ocr', 'historical': True, 'messages': [{
+            'source': 'ocr', 'historical': True, 'sidebar_changed': False,
+            'sidebar_signature': 'sig-current-new', 'tail_baseline_verified': True,
+            'tail_verified': True, 'messages': [{
                 'id': 'different-viewport', 'side': 'other', 'sender': 'Synthetic contact',
                 'text': 'Unrelated old context', 'source': 'ocr', 'historical': True}]})
-        self.assertTrue(self.ctrl.auto_paused)
+        self.assertFalse(self.ctrl.auto_paused)
         self.assertIsNone(self.ctrl.auto_trigger)
         self.capture_type.return_value.send.assert_not_called()
+        self._incoming(ident='after-old-scroll', text='A genuinely newer question?')
+        self.assertEqual(self.ctrl.auto_trigger['message']['id'], 'after-old-scroll')
 
-    def test_stable_background_viewport_rebases_without_sending_old_batch(self):
+    def test_changed_sidebar_and_verified_tail_rebase_and_judge_latest_message(self):
         self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})
         self._incoming(ident='before-gap')
         self.assertIsNotNone(self.ctrl.auto_trigger)
         self.ctrl._on_capture('messages', {'session_id': self.sid, 'title': 'Synthetic contact',
-            'source': 'ocr', 'historical': True, 'background_stable': True,
+            'source': 'ocr', 'historical': True, 'sidebar_changed': True,
+            'sidebar_signature': 'sig-new-baseline',
             'tail_baseline_verified': True, 'tail_verified': True, 'messages': [
                 {'id': 'new-baseline-1', 'side': 'me', 'text': 'Visible self context',
                  'source': 'ocr', 'historical': True},
                 {'id': 'new-baseline-2', 'side': 'other', 'sender': 'Synthetic contact',
                  'text': 'Visible incoming baseline', 'source': 'ocr', 'historical': True}]})
         self.assertFalse(self.ctrl.auto_paused)
-        self.assertIsNone(self.ctrl.auto_trigger)
+        self.assertEqual(self.ctrl.auto_trigger['message']['id'], 'new-baseline-2')
         self.assertEqual(self.ctrl.sessions[self.sid]['messages'][-1]['id'], 'new-baseline-2')
         self.capture_type.return_value.send.assert_not_called()
-        self._incoming(ident='after-gap', text='A newer question?')
-        self.assertEqual(self.ctrl.auto_trigger['message']['id'], 'after-gap')
+        self.assertEqual(self.ctrl.auto_trigger['event']['sidebar_signature'], 'sig-new-baseline')
 
-    def test_partial_overlap_scroll_without_tail_anchor_pauses(self):
+    def test_changed_sidebar_without_verified_tail_is_skipped_and_keeps_listening(self):
         self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})
         self.ctrl._on_capture('messages', {'session_id': self.sid, 'title': 'Synthetic contact',
-            'source': 'ocr', 'historical': False, 'tail_baseline_verified': False,
+            'source': 'ocr', 'historical': True, 'sidebar_changed': True,
+            'sidebar_signature': 'sig-unverified', 'tail_baseline_verified': True,
             'tail_verified': False, 'messages': [{
                 'id': 'old-scrolled-bubble', 'side': 'other', 'sender': 'Synthetic contact',
-                'text': 'An older unrelated message', 'source': 'ocr', 'historical': False}]})
-        self.assertTrue(self.ctrl.auto_paused)
+                'text': 'An older unrelated message', 'source': 'ocr', 'historical': True}]})
+        self.assertFalse(self.ctrl.auto_paused)
         self.assertIsNone(self.ctrl.auto_trigger)
         self.capture_type.return_value.send.assert_not_called()
+        self._incoming(ident='after-unverified', text='A verified new question?')
+        self.assertEqual(self.ctrl.auto_trigger['message']['id'], 'after-unverified')
 
     def test_allowlist_persists_but_sender_never_auto_starts_after_restart(self):
         self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})

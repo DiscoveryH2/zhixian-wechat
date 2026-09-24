@@ -39,6 +39,28 @@ class SendQueueTests(unittest.TestCase):
                 service._send_worker(task)
         sender.assert_not_called()
 
+    def test_changed_sidebar_signature_blocks_a_stale_auto_reply(self):
+        service = CaptureService(lambda *_: None)
+        service._hwnd, service._native_title = 123, 'WeChat'
+        service._cap = SimpleNamespace(area=(0, 0, 300, 150, np.zeros(3, dtype=np.uint8), 0))
+        frame = np.zeros((300, 300, 3), dtype=np.uint8)
+        task = {'mode': 'send', 'text': 'Synthetic reply', 'title': 'Synthetic group',
+                'expected_incoming': 'Synthetic question', 'expected_sender': '',
+                'expected_previous': '', 'expected_sidebar_signature': 'earlier-summary',
+                'cancelled': threading.Event(), 'epoch': service._control_epoch}
+        with patch.object(service, '_close_capture'), patch.object(service, '_ensure_capture'), \
+             patch.object(service, '_frame', side_effect=lambda wait=0: (frame, time.monotonic())), \
+             patch.object(service, '_read_frame', side_effect=lambda *_a, **_k: ('Synthetic group', (0, 0, 300, 150), time.monotonic())), \
+             patch('app.ocr.Reader') as reader, \
+             patch('app.ocr.sidebar_latest_meta', return_value={'signature': 'newer-summary'}), \
+             patch('app.ocr.sidebar_tail_matches', return_value=True), \
+             patch('app.winapi.window_title', return_value='WeChat'), \
+             patch('app.auto_send.send_verified') as sender:
+            reader.return_value.read.return_value = [('her', 'Synthetic member', 'Synthetic question', 10)]
+            with self.assertRaisesRegex(RuntimeError, '最新消息已变化'):
+                service._send_worker(task)
+        sender.assert_not_called()
+
     def test_send_worker_audits_its_own_enter_call(self):
         with tempfile.TemporaryDirectory() as root:
             audit = Path(root) / 'send-audit.jsonl'

@@ -97,6 +97,7 @@ class SafetyTests(unittest.TestCase):
         fake_frame.__getitem__ = Mock(return_value=object())
         capture_module = types.SimpleNamespace(chat_area=lambda _: (1, 2, 3, 4, 0, 0))
         ocr_module = types.SimpleNamespace(Reader=Mock(), read_title=lambda _: "",
+                                           sidebar_latest_meta=lambda *args, **kwargs: None,
                                            sidebar_tail_matches=lambda *args, **kwargs: False)
         with patch.dict(sys.modules, {"app.capture": capture_module, "app.ocr": ocr_module}):
             with self.assertRaisesRegex(RuntimeError, "无法识别会话标题"):
@@ -218,6 +219,30 @@ class SidebarTailTests(unittest.TestCase):
     def test_selected_preview_and_recent_chat_time_anchor_match(self):
         self.assertTrue(self._check())
 
+    def test_latest_meta_has_minute_preview_and_stable_change_signature(self):
+        import numpy as np
+        from datetime import datetime
+        from app import ocr
+
+        full = np.full((400, 800, 3), 245, dtype=np.uint8)
+        full[110:155, 72:400] = (40, 180, 80)
+        area = (400, 80, 780, 380)
+        def meta_for(stamp, preview):
+            rows = [self._row(8, stamp), self._row(38, preview)]
+            with patch.object(ocr, "_engine", return_value=lambda image, use_cls=False: (rows, None)):
+                return ocr.sidebar_latest_meta(full, area, now=datetime(2026, 9, 24, 14, 2))
+
+        first = meta_for("14:00", "Alice: 最新消息正文")
+        self.assertEqual(first["minute"], 14 * 60)
+        self.assertEqual(first["time_text"], "14:00")
+        self.assertEqual(first["preview"], "Alice: 最新消息正文")
+        self.assertEqual(len(first["signature"]), 24)
+        self.assertNotIn("最新消息正文", first["signature"])
+        self.assertNotEqual(first["signature"], meta_for("14:01", "Alice: 最新消息正文")["signature"])
+        self.assertNotEqual(first["signature"], meta_for("14:00", "Alice: 新消息")["signature"])
+        self.assertIsNone(meta_for("13:54", "Alice: 最新消息正文"))
+
+
     def test_rejects_old_or_nonmatching_sidebar_preview(self):
         self.assertFalse(self._check(sidebar_time="13:54"))
         self.assertFalse(self._check(preview="另一条完全不同的内容"))
@@ -234,6 +259,58 @@ class SidebarTailTests(unittest.TestCase):
 
     def test_group_count_prefix_does_not_break_sender_match(self):
         self.assertTrue(self._check(sender="Alice", preview="[4条]Alice: 最新消息正文"))
+
+
+class CaptureSidebarBaselineTests(unittest.TestCase):
+    def test_sidebar_signature_baselines_then_only_marks_new_live_tail(self):
+        import numpy as np
+
+        events = []
+        service = CaptureService(lambda kind, payload: events.append((kind, payload)))
+        service._hwnd = 2
+        service._cap = Mock()
+        frame = np.zeros((400, 800, 3), dtype=np.uint8)
+        area = (400, 80, 780, 380, np.array([245, 245, 245]), 0)
+        lines = [
+            [("her", None, "已知尾部旧消息", 220)],
+            [("her", None, "已知尾部旧消息", 220), ("her", None, "新收到的消息", 280)],
+            [("her", None, "滚动看到的更早消息", 120)],
+        ]
+        reader = Mock()
+        reader.read.side_effect = lines
+        meta_a = {"signature": "signature-A"}
+        meta_b = {"signature": "signature-B"}
+        selected_module = types.SimpleNamespace(chat_area=Mock(return_value=area))
+        ocr_module = types.SimpleNamespace(
+            Reader=Mock(return_value=reader),
+            read_title=Mock(return_value="合成会话"),
+            sidebar_latest_meta=Mock(side_effect=[meta_a, meta_b, meta_b]),
+            sidebar_tail_matches=Mock(return_value=True),
+        )
+        winapi_module = types.SimpleNamespace(
+            libraries=Mock(return_value=(types.SimpleNamespace(GetForegroundWindow=lambda: 1), None, None)))
+
+        with patch.dict(sys.modules, {"app.capture": selected_module, "app.ocr": ocr_module,
+                                      "app.winapi": winapi_module}):
+            service._read_frame(frame, 1.0)
+            first_message = [p for kind, p in events if kind == "messages"][-1]
+            self.assertFalse(first_message["sidebar_changed"])
+            self.assertEqual(first_message["sidebar_signature"], "signature-A")
+
+            service._read_frame(frame, 2.0)
+            second_message = [p for kind, p in events if kind == "messages"][-1]
+            self.assertEqual([m["text"] for m in second_message["messages"]], ["新收到的消息"])
+            self.assertTrue(second_message["sidebar_changed"])
+            self.assertEqual(second_message["sidebar_signature"], "signature-B")
+
+            service._read_frame(frame, 3.0)
+            third_message = [p for kind, p in events if kind == "messages"][-1]
+            self.assertTrue(third_message["historical"])
+            self.assertFalse(third_message["sidebar_changed"])
+            self.assertEqual(third_message["sidebar_signature"], "signature-B")
+
+        self.assertEqual(ocr_module.sidebar_latest_meta.call_count, 3)
+        self.assertEqual(ocr_module.sidebar_tail_matches.call_count, 3)
 
 
 class OneShotTests(unittest.TestCase):

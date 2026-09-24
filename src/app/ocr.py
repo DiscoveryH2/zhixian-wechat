@@ -2,13 +2,16 @@
 """消息区截图 → 谁说了什么。RapidOCR 吃 numpy，不落盘。"""
 import difflib
 from datetime import datetime
+import hashlib
 import re
+import secrets
 import unicodedata
 
 import numpy as np
 
 
 _ENGINE = None
+_SIDEBAR_SALT = secrets.token_bytes(16)
 
 
 def _engine():
@@ -74,22 +77,21 @@ def similar(a, b):
     return len(a) == len(b) >= 3 and sum(x != y for x, y in zip(a, b)) <= 1  # 短句错一个字
 
 
-def sidebar_tail_matches(full, area, lines, now=None, min_body_chars=4):
-    """Fail closed unless the selected chat preview matches the visible tail.
+def sidebar_latest_meta(full, area, now=None, max_age_minutes=5):
+    """Return the recent selected-row summary from an in-memory frame, or None.
 
-    This is only a send/continuation gate. It never turns an ambiguous OCR
-    batch into a live event on its own. Unsupported themes or layouts return
-    False rather than guessing where the conversation ends.
+    ``signature`` is suitable for per-conversation change detection. The preview
+    remains process-local OCR text and must not be persisted or emitted.
     """
-    if full is None or area is None or not lines or lines[-1][0] not in ('me', 'her', 'other'):
-        return False
-    x0, y0, x1, y1 = area[:4]
-    if x0 < 145 or y1 - y0 < 100:
-        return False
+    if full is None or area is None or len(area) < 4:
+        return None
+    x0 = area[0]
+    if x0 < 145:
+        return None
     xstart = max(0, int(x0 * .18))
     strip = full[:, xstart:x0].astype(np.int16)
     if strip.size == 0:
-        return False
+        return None
     green = ((strip[:, :, 1] > strip[:, :, 0] + 28) &
              (strip[:, :, 1] > strip[:, :, 2] + 12) & (strip[:, :, 1] > 70))
     active = green.mean(axis=1) > .55
@@ -104,31 +106,63 @@ def sidebar_tail_matches(full, area, lines, now=None, min_body_chars=4):
     if start is not None and 25 <= len(active) - start <= 150:
         bands.append((start, len(active)))
     if len(bands) != 1:
-        return False
+        return None
     lo, hi = bands[0]
     rows, _ = _engine()(full[lo:hi, xstart:x0], use_cls=False)
     rows = sorted((row for row in (rows or []) if float(row[2]) >= .8),
                   key=lambda row: row[0][0][1])
     if len(rows) < 2:
-        return False
+        return None
     headline = ''.join(str(row[1]) for row in rows[:-1])
-    preview = str(rows[-1][1])
+    preview = str(rows[-1][1]).strip()
     match = re.search(r'(?<!\d)(\d{1,2}):([0-5]\d)(?!\d)', headline)
-    if not match:
-        return False
-    stamp_minute = int(match[1]) * 60 + int(match[2])
+    if not match or not preview:
+        return None
+    hour, minute = int(match[1]), int(match[2])
+    stamp_minute = hour * 60 + minute
     current = now or datetime.now()
     current_minute = current.hour * 60 + current.minute
-    if int(match[1]) > 23 or not 0 <= current_minute - stamp_minute <= 5:
+    if hour > 23 or (max_age_minutes is not None and
+                    not 0 <= current_minute - stamp_minute <= max_age_minutes):
+        return None
+    time_text = f"{hour:02d}:{minute:02d}"
+    compact_preview = re.sub(r'\s+', '', unicodedata.normalize('NFKC', preview)).casefold()
+    return {
+        "minute": stamp_minute,
+        "time_text": time_text,
+        "preview": preview,
+        "signature": hashlib.blake2b(f"{time_text}|{compact_preview}".encode('utf-8'),
+                                       key=_SIDEBAR_SALT, digest_size=12).hexdigest(),
+    }
+
+
+def sidebar_tail_matches(full, area, lines, now=None, min_body_chars=4, meta=None):
+    """Fail closed unless the selected chat preview matches the visible tail.
+
+    This is only a send/continuation gate. It never turns an ambiguous OCR
+    batch into a live event on its own. Unsupported themes or layouts return
+    False rather than guessing where the conversation ends.
+    """
+    if full is None or area is None or not lines or lines[-1][0] not in ('me', 'her', 'other'):
+        return False
+    x0, y0, x1, y1 = area[:4]
+    if x0 < 145 or y1 - y0 < 100:
+        return False
+    meta = meta if meta is not None else sidebar_latest_meta(full, area, now=now)
+    if meta is None:
+        return False
+    current = now or datetime.now()
+    age_minutes = current.hour * 60 + current.minute - meta['minute']
+    if not 0 <= age_minutes <= 5:
         return False
     compact = lambda value: re.sub(r'\s+', '', unicodedata.normalize('NFKC', str(value))).casefold()
     body = compact(lines[-1][2])
-    visible_preview = compact(preview)
+    visible_preview = compact(meta["preview"])
     if len(body) < min_body_chars or body not in visible_preview:
         return False
     sender = compact(lines[-1][1] or '')
-    if sender and re.search(r'[:：]', preview):
-        named = compact(re.sub(r'^\[\d+条\]', '', re.split(r'[:：]', preview, maxsplit=1)[0]))
+    if sender and re.search(r'[:：]', meta["preview"]):
+        named = compact(re.sub(r'^\[\d+条\]', '', re.split(r'[:：]', meta["preview"], maxsplit=1)[0]))
         if sender != named:
             return False
     # A recent time label in the chat pane further reduces the chance that a
@@ -143,7 +177,7 @@ def sidebar_tail_matches(full, area, lines, now=None, min_body_chars=4):
     if not before_tail:
         return False
     latest_label = max(before_tail)[1]
-    return 0 <= stamp_minute - latest_label <= 15
+    return 0 <= meta["minute"] - latest_label <= 15
 
 
 class Reader:

@@ -192,7 +192,7 @@ window.ZhixianExperience = Object.freeze({
     function autoReplyState() { return getState().auto_reply || {}; }
     function autoReplyStatus(a) {
       if (a.status === 'emergency') return ['已紧急停止', 'error'];
-      if (a.status === 'blocked') return ['等待微信连接', 'paused'];
+      if (a.status === 'blocked') return [a.waiting_for_target ? '等待允许会话' : '等待微信连接', 'paused'];
       if (a.status === 'error') return ['需要处理', 'error'];
       if (a.enabled && !a.paused) return ['运行中', 'active'];
       if (a.enabled && a.paused) return ['已暂停', 'paused'];
