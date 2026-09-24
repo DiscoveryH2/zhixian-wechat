@@ -20,17 +20,20 @@ def _model_job(pipe, kind, payload):
         elif kind == 'analyze_moment':
             from core.moments import analyze_post
             result = analyze_post(**payload)
+        elif kind == 'judge_backlog':
+            from core.backlog import evaluate_backlog
+            result = evaluate_backlog(**payload)
         else:
             raise ValueError('未识别的模型任务。')
         pipe.send((True, result))
     except Exception as exc:
         config = payload if kind == 'test_connection' else payload.get('config', {})
-        error = str(exc)[:1200] or '模型任务未完成。'
+        error = str(exc) or '模型任务未完成。'
         for name in ('api_key', 'reply_api_key', 'weflow_token', 'vision_api_key', 'stt_api_key'):
             value = config.get(name)
             if value:
                 error = error.replace(value, '[已隐藏]')
-        pipe.send((False, error))
+        pipe.send((False, error[:1200]))
     finally:
         pipe.close()
 

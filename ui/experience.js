@@ -7,7 +7,7 @@ window.ZhixianExperience = Object.freeze({
     const catalog = { items: [], query: '', filter: 'all', cursor: null, more: false, total: null, busy: false, available: false, source: '', serial: 0, onSelect: null, multi: false, selected: new Map() };
     const moments = { items: [], cursor: null, more: false, loaded: false, busy: false, available: false, source: '', detail: '', error: '', friend: null, results: new Map(), running: new Set(), serial: 0 };
     const histories = new Map(), momentMedia = new Map();
-    let appearance = { theme: 'night', font_scale: 1, background_url: '' }, introTimer, searchTimer, importBusy = false;
+    let appearance = { theme: 'night', font_scale: 1, background_url: '' }, introTimer, searchTimer, importBusy = false, catchupSessionId = '', catchupBusy = false;
 
     function safeMedia(value) {
       if (typeof value !== 'string' || !value || value.length > 28 * 1024 * 1024) return '';
@@ -200,8 +200,40 @@ window.ZhixianExperience = Object.freeze({
     }
     function autoReplyCount(value, fallback) { const number = Number(value); return Number.isFinite(number) && number > 0 ? number : fallback; }
     function autoReplyReason(item) {
-      const reasons = { not_mentioned: '群聊中未明确 @ 我', unverified_session: '会话未通过实时核验', session_not_visible: '微信当前未显示此会话', cooldown: '处于同会话冷却时间', hourly_limit: '达到每小时发送限额', daily_limit: '达到每日发送限额', no_reply_needed: '判断无需回复', duplicate: '重复消息已忽略', unsupported_message: '暂不支持此类消息', send_failed: '微信未确认发送成功', signature_appended: '末尾附固定署名“（以上内容为知弦生成）”' };
+      const reasons = { not_mentioned: '群聊中未明确 @ 我', unverified_session: '会话未通过实时核验', session_not_visible: '微信当前未显示此会话', cooldown: '处于同会话冷却时间', hourly_limit: '达到每小时发送限额', daily_limit: '达到每日发送限额', no_reply_needed: '判断无需回复', duplicate: '重复消息已忽略', unsupported_message: '暂不支持此类消息', send_failed: '微信未确认发送成功', signature_appended: '末尾附固定署名“（以上内容为知弦生成）”', demo_only: '合成演示未向微信发送消息' };
       return reasons[item.reason] || (item.reason ? String(item.reason).slice(0, 160) : item.status === 'failed' ? '发送未完成' : item.status === 'skipped' ? '根据安全规则跳过' : '');
+    }
+    function catchupStatusText(catchup) {
+      const labels = { idle: '等待处理', judging: '正在判断是否值得回复', sending: '正在发送', sent: '已发送一条回复', skipped: '判断后未发送', failed: '处理失败' };
+      if (!catchup) return '尚未运行历史补回。';
+      const reason = autoReplyReason({ reason: catchup.reason, status: catchup.status });
+      return `${labels[catchup.status] || '状态未知'}${reason ? ` · ${reason}` : ''}`;
+    }
+    function confirmCatchup(session) {
+      const dialog = $('#editor'); dialog.replaceChildren(); dialog.className = 'dialog auto-reply-confirm';
+      const group = Boolean(session.is_group || session.type === 'group');
+      const copy = append(el('div', 'auto-reply-confirm-copy'), el('span', 'auto-reply-confirm-symbol', '↗'), el('div', 'eyebrow', demo ? '合成演示' : '单次发送确认'), el('h2', '', '运行一次历史补回？'), el('p', '', demo ? '演示模式只会更新合成状态，不会连接微信或发送消息。' : `只检查当前微信可见会话“${session.title || '已选会话'}”中最新一轮尚未解决的历史入站消息。知弦会先判断现在是否值得回复；最多发送一条，并遵守会话核验、限额和其他发送规则。发送时会附固定署名“（以上内容为知弦生成）”。${group ? ' 群聊仅在本轮有明确 @ 我证据时才会发送。' : ''}`));
+      const checks = el('div', 'auto-reply-confirm-checks');
+      checks.append(el('div', 'auto-reply-confirm-check', '点击下方确认即授权这一次判断与至多一条发送。'));
+      let ownDisplayName;
+      if (group) {
+        const nameField = el('label', 'field auto-reply-catchup-select'); nameField.append(el('span', 'field-label', '我在该群的显示名'));
+        ownDisplayName = el('input', 'input'); ownDisplayName.type = 'text'; ownDisplayName.maxLength = 80; ownDisplayName.autocomplete = 'off'; ownDisplayName.placeholder = '留空时群聊会安全跳过';
+        nameField.append(ownDisplayName, el('span', 'field-hint', '仅用于本次确认群聊中的 @ 我证据，不会保存。')); checks.append(nameField);
+      }
+      const run = button(demo ? '模拟运行一次' : '确认并运行一次', 'play', async () => {
+        if (catchupBusy) return;
+        catchupBusy = true; run.disabled = true;
+        try {
+          const params = { session_id: session.session_id, acknowledge_send: true };
+          if (group) params.own_display_name = ownDisplayName.value.trim();
+          const result = await rpc('catch_up_auto_reply', params);
+          if (result?.started !== true) throw new Error(result?.message || '历史补回没有启动。');
+          dialog.close(); await sync(); render(); toast(demo ? '演示模式：仅更新合成状态，没有发送消息' : '已开始历史补回；结果会显示在本页');
+        } catch (err) { toast(errorText(err), 'error'); }
+        finally { catchupBusy = false; run.disabled = false; }
+      }, 'primary');
+      dialog.append(copy, checks, append(el('div', 'dialog-footer'), button('取消', null, () => dialog.close()), run)); dialog.showModal();
     }
     function renderAutoReply() {
       const a = autoReplyState(), [statusText, statusClass] = autoReplyStatus(a), root = el('section', 'page auto-reply-page');
@@ -215,6 +247,23 @@ window.ZhixianExperience = Object.freeze({
       else statusActions.append(button('启动自动回复', 'play', () => confirmAutoReplyStart(), 'small primary', !available() || !a.allowlist?.length));
       liveCard.append(statusIcon, statusCopy, statusActions); root.append(liveCard);
       root.append(notice('这项功能会通过微信真实发送消息。每条自动发送回复末尾都会附固定署名“（以上内容为知弦生成）”。当前 PC 自动发送只面向微信当前可见且可核验的聊天；导入的历史记录不能发送，也没有已验证的后台 WeFlow 发送 API。群聊默认仅回复明确 @ 我。OCR 没有可靠的 @ 标记，因此默认模式不会对 OCR 群聊自动发送；如要对 OCR 群聊发送，需显式选择“所有新消息”。', 'warn'));
+
+      const permittedSessions = a.allowlist || [], visibleId = getState().current_session?.id;
+      if (!permittedSessions.some(item => item.session_id === catchupSessionId)) catchupSessionId = permittedSessions.find(item => item.session_id === visibleId)?.session_id || permittedSessions[0]?.session_id || '';
+      const selectedCatchup = permittedSessions.find(item => item.session_id === catchupSessionId);
+      const catchup = a.catchup;
+      const catchupCard = el('section', 'panel auto-reply-catchup');
+      const catchupHead = append(el('div', 'auto-reply-section-head'), append(el('div'), el('div', 'eyebrow', '单次操作'), el('h2', '', '历史补回')));
+      const catchupSelectLabel = el('label', 'field auto-reply-catchup-select'); catchupSelectLabel.append(el('span', 'field-label', '从允许名单选择会话'));
+      const catchupSelect = el('select', 'input'); catchupSelect.setAttribute('aria-label', '历史补回会话');
+      catchupSelect.append(new Option(permittedSessions.length ? '选择一个会话' : '请先将实时会话加入允许名单', ''));
+      for (const item of permittedSessions) catchupSelect.append(new Option(`${item.title || item.session_id}${item.is_group ? ' · 群聊' : ''}`, item.session_id));
+      catchupSelect.value = catchupSessionId; catchupSelect.disabled = !permittedSessions.length || catchupBusy;
+      catchupSelect.addEventListener('change', () => { catchupSessionId = catchupSelect.value; render(true); });
+      const chatMatches = Boolean(selectedCatchup && selectedCatchup.session_id === visibleId && getState().current_session?.active);
+      const catchupButton = button(catchupBusy ? '正在启动…' : '检查并补回一次', 'spark', () => selectedCatchup && confirmCatchup(selectedCatchup), 'small primary', !available() || !selectedCatchup || !chatMatches || catchupBusy || ['judging', 'sending'].includes(catchup?.status));
+      catchupCard.append(catchupHead, catchupSelectLabel, catchupSelect, el('p', 'field-hint auto-reply-catchup-hint', '只检查当前可见聊天中最新一轮尚未解决的历史入站消息；判断为值得回复时最多发送一条。必须是当前微信可见且核验通过的会话，已处理消息不会重复发送。群聊必须有明确 @ 我证据。'), catchupButton, el('p', 'auto-reply-catchup-state', catchupStatusText(catchup)));
+      if (catchup?.session_id && catchup.session_id !== catchupSessionId) catchupCard.querySelector('.auto-reply-catchup-state').textContent = `${catchupStatusText(catchup)} · ${permittedSessions.find(item => item.session_id === catchup.session_id)?.title || '其他会话'}`;
 
       const settings = el('section', 'panel auto-reply-settings');
       settings.append(append(el('div', 'auto-reply-section-head'), append(el('div'), el('div', 'eyebrow', '范围与节奏'), el('h2', '', '你决定知弦可以回复谁')),
@@ -239,7 +288,7 @@ window.ZhixianExperience = Object.freeze({
       limits.append(autoReplyNumberField('每小时最多发送', 'hourly_limit', a.hourly_limit, 1, 30), autoReplyNumberField('每天最多发送', 'daily_limit', a.daily_limit, 1, 100));
       form.append(modeField, timing, limits);
       form.append(append(el('div', 'auto-reply-form-footer'), el('span', 'field-hint', '每次启动后都需要手动开启。限额按本机统计。'), button('保存规则', 'check', async () => { if (!form.reportValidity()) return; await rpc('configure_auto_reply', { allowlist: a.allowlist || [], ...autoReplyPolicy(form) }); await sync(); toast('自动回复规则已保存'); }, 'small')));
-      root.append(settings, form);
+      root.append(catchupCard, settings, form);
 
       const recent = el('section', 'panel auto-reply-recent');
       recent.append(append(el('div', 'auto-reply-section-head'), append(el('div'), el('div', 'eyebrow', '运行记录'), el('h2', '', '最近处理')),

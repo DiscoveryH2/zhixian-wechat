@@ -18,10 +18,14 @@ class ModelProcessTests(unittest.TestCase):
         parent = self
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
-                self.rfile.read(int(self.headers['Content-Length']))
+                request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 received.set()
                 time.sleep(parent.delay)
-                data = json.dumps({'answers': {'connection': {'type': 'noul', 'noul': 1}}}).encode()
+                if 'reply_now' in request.get('questions', {}):
+                    answers = {'reply_now': {'type': 'choice', 'choice': 'reply', 'confidence': 0.9}}
+                else:
+                    answers = {'connection': {'type': 'noul', 'noul': 1}}
+                data = json.dumps({'answers': answers}).encode()
                 try:
                     self.send_response(200)
                     self.send_header('Content-Length', str(len(data)))
@@ -56,6 +60,16 @@ class ModelProcessTests(unittest.TestCase):
         self.tasks.close()
         self.assertLess(time.monotonic() - started, 2)
         self.assertTrue(future.cancelled())
+
+    def test_spawned_backlog_judgment_uses_typed_local_protocol(self):
+        now = time.time()
+        result = self.tasks.submit('judge_backlog', {'messages': [
+            {'id': 'synthetic-out', 'side': 'me', 'text': '明天聊。', 'timestamp': now - 60},
+            {'id': 'synthetic-in', 'side': 'other', 'text': '上午方便吗？', 'timestamp': now - 30}],
+            'config': self.config, 'chat_type': 'private',
+            'chat_name': 'Synthetic Contact'}).result(timeout=15)
+        self.assertIs(result['should_reply'], True)
+        self.assertEqual(result['target_message_id'], 'synthetic-in')
 
 
 if __name__ == '__main__':

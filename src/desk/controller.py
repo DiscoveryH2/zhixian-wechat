@@ -37,6 +37,8 @@ class Controller(QObject):
     importFinished = Signal(object, object)
     mediaFinished = Signal(str, str, object, object)
     autoSendFinished = Signal(str, object, object)
+    catchUpPrepared = Signal(int, str, str, object, object)
+    catchUpSent = Signal(int, str, object, object)
 
     def __init__(self, directory: Path):
         super().__init__()
@@ -95,6 +97,9 @@ class Controller(QObject):
         self.auto_running_trigger = None
         self.auto_epoch = 0
         self.auto_send_busy = False
+        self.catchup = {'session_id': None, 'status': 'idle', 'reason': ''}
+        self.catchup_serial = 0
+        self.catchup_busy = False
         self.closed = False
         self.allow_initial = False
         self.paused_by_user = False
@@ -108,6 +113,8 @@ class Controller(QObject):
         self.importFinished.connect(self._on_import_finished)
         self.mediaFinished.connect(self._on_media_finished)
         self.autoSendFinished.connect(self._on_auto_sent)
+        self.catchUpPrepared.connect(self._on_catchup_prepared)
+        self.catchUpSent.connect(self._on_catchup_sent)
         self._sync_hub()
         if self.store.config['source'] in ('weflow', 'auto') and self.store.secrets['weflow_token']:
             self.hub.prewarm(self.store.full_config(), limit=5)
@@ -151,7 +158,8 @@ class Controller(QObject):
                 'daily_limit': self.auto_policy['daily_limit'],
                 'sent_hour': sum(1 for item in sent if now - item['at'] < 3600),
                 'sent_day': sum(1 for item in sent if now - item['at'] < 86400),
-                'recent': copy.deepcopy(self.auto_recent[-12:])}
+                'recent': copy.deepcopy(self.auto_recent[-12:]),
+                'catchup': copy.deepcopy(self.catchup)}
 
     def _save_auto_state(self):
         # Never restore an armed sender after process restart. This file contains
@@ -175,6 +183,10 @@ class Controller(QObject):
         self.auto_epoch += 1
         self.auto_trigger = None
         self.auto_running_trigger = None
+        if self.catchup_busy:
+            self.catchup_serial += 1
+            self.catchup_busy = False
+            self.catchup = {**self.catchup, 'status': 'skipped', 'reason': '一次性历史补回已停止。'}
         if hasattr(self.capture, 'cancel_pending_writes'):
             self.capture.cancel_pending_writes()
 
@@ -390,6 +402,166 @@ class Controller(QObject):
             self.auto_paused = True
             self._auto_record(sid, 'failed', '安全核验或发送失败，已暂停')
             self.auto_detail = '安全核验未通过，自动回复已暂停。'
+        self._save_auto_state()
+        self.emit()
+
+    def _prepare_catchup_task(self, cfg, session, chat_type, own_display_name):
+        judged = self.models.submit('judge_backlog', {
+            'messages': session['messages'], 'config': cfg, 'chat_type': chat_type,
+            'chat_name': session['title'], 'own_display_name': own_display_name,
+            'current_session_acknowledged': True}).result(timeout=180)
+        if judged.get('should_reply') is not True:
+            return {'judged': judged, 'analysis': None}
+        draft_config = dict(cfg)
+        draft_config['style'] = (str(draft_config.get('style') or '')[:2000] +
+                                 '\n一次性历史补回请用不超过130字的自然短句，只回答仍然需要回应的最后一轮消息。'
+                                 '不编造事实或承诺；无需添加来源标识，应用会在发送前附上固定的知弦说明。')
+        analyzed = self.models.submit('analyze', {'messages': session['messages'],
+            'config': draft_config, 'background': '', 'history': None, 'reply_to': None}).result(timeout=180)
+        return {'judged': judged, 'analysis': analyzed}
+
+    def _catch_up_once(self, params):
+        if params.get('acknowledge_send') is not True:
+            raise ValueError('请确认：一次性历史补回可能向当前微信会话直接发送一条消息。')
+        if self.catchup_busy or self.auto_send_busy or (self.auto_policy['enabled'] and not self.auto_paused):
+            raise ValueError('已有自动回复任务在运行，请先暂停后再执行历史补回。')
+        if not self.store.secrets['api_key']:
+            raise ValueError('请先配置 Jev API Key。')
+        sid = str(params.get('session_id') or '')[:256]
+        chosen = next((item for item in self.auto_allowlist if item['session_id'] == sid), None)
+        if not chosen or chosen.get('source') not in ('ocr', 'weflow'):
+            raise ValueError('历史补回只允许名单内的实时会话，导入归档不能发送。')
+        session = self.sessions.get(sid)
+        if (not session or sid != self.live_id or self.status['capture'] != 'live' or
+                session.get('source') != chosen['source'] or len(session.get('messages') or []) < 2):
+            raise ValueError('请先在微信打开目标会话，并读取至少两条可核对的上下文。')
+        if session['messages'][-1].get('side') != 'other':
+            raise ValueError('你已是最后发言人；没有待补回的最新来信。')
+        if session['messages'][-1].get('kind', 'text') != 'text':
+            raise ValueError('历史补回目前只支持最后一条为文字消息。')
+        if chosen['type'] == 'group' and not str(session['messages'][-1].get('sender') or '').strip():
+            raise ValueError('群聊最后发言人无法核对，已拒绝历史补回。')
+        from core.client import resolve_decision, resolve_reply
+        cfg = self.store.full_config()
+        if resolve_reply(cfg, resolve_decision(cfg)) is None:
+            raise ValueError('当前判断服务没有可用的回复生成模型。')
+        own_display_name = str(params.get('own_display_name') or '').strip()[:80]
+        self.auto_policy['session_ids'] = [entry['session_id'] for entry in self.auto_allowlist]
+        self.catchup_serial += 1
+        serial = self.catchup_serial
+        frozen = copy.deepcopy(session)
+        fingerprint = self.fingerprint(frozen)
+        self.catchup_busy = True
+        self.catchup = {'session_id': sid, 'status': 'judging',
+                        'reason': '正在判断最近一轮历史来信是否仍值得回复。'}
+        try:
+            future = self.pool.submit(self._prepare_catchup_task, cfg, frozen, chosen['type'], own_display_name)
+            future.add_done_callback(lambda done: self._emit_catchup_prepared(serial, sid, fingerprint, done))
+        except Exception:
+            self.catchup_busy = False
+            self.catchup = {'session_id': sid, 'status': 'failed', 'reason': '历史判断任务未能启动。'}
+            raise
+        self.emit()
+        return {'started': True, 'session_id': sid}
+
+    def _emit_catchup_prepared(self, serial, sid, fingerprint, future):
+        if self.closed or future.cancelled():
+            return
+        try:
+            self.catchUpPrepared.emit(serial, sid, fingerprint, future.result(), None)
+        except Exception as exc:
+            self.catchUpPrepared.emit(serial, sid, fingerprint, None, self.safe_error(exc))
+
+    def _on_catchup_prepared(self, serial, sid, fingerprint, prepared, error):
+        if self.closed or serial != self.catchup_serial or not self.catchup_busy:
+            return
+        session = self.sessions.get(sid)
+        if error or not prepared:
+            self.catchup = {'session_id': sid, 'status': 'failed', 'reason': '历史判断或草稿生成未完成。'}
+            self.catchup_busy = False
+            self._auto_record(sid, 'failed', '历史判断或草稿生成失败')
+        elif (not session or sid != self.live_id or self.status['capture'] != 'live' or
+                self.fingerprint(session) != fingerprint):
+            self.catchup = {'session_id': sid, 'status': 'skipped', 'reason': '会话或最近消息已变化，旧判断未发送。'}
+            self.catchup_busy = False
+            self._auto_record(sid, 'skipped', '会话或最近消息已变化')
+        else:
+            judged = prepared.get('judged') or {}
+            analyzed = prepared.get('analysis') or {}
+            target = session['messages'][-1]
+            if judged.get('should_reply') is not True or judged.get('target_message_id') != target.get('id'):
+                self.catchup = {'session_id': sid, 'status': 'skipped',
+                                'reason': 'Jev 判断当前没有需要补回的明确消息。'}
+                self.catchup_busy = False
+                self._auto_record(sid, 'skipped', '历史消息不需回复或判断不充分')
+            elif (analyzed.get('should_reply') is not True or
+                  isinstance(analyzed.get('risk'), bool) or
+                  not isinstance(analyzed.get('risk'), (int, float)) or
+                  not 0 <= analyzed['risk'] <= 3):
+                self.catchup = {'session_id': sid, 'status': 'skipped',
+                                'reason': '回复时机或风险判断未满足自动发送条件。'}
+                self.catchup_busy = False
+                self._auto_record(sid, 'skipped', '回复时机或风险条件不满足')
+            else:
+                candidates, index = analyzed.get('candidates') or [], analyzed.get('best_index')
+                if not isinstance(index, int) or not 0 <= index < len(candidates):
+                    self.catchup = {'session_id': sid, 'status': 'skipped', 'reason': '没有完成 Jev 排序的候选回复。'}
+                    self.catchup_busy = False
+                    self._auto_record(sid, 'skipped', '没有完成候选排序')
+                else:
+                    reply = str(candidates[index].get('text') or '').strip().replace(AUTO_DISCLOSURE, '').rstrip() + AUTO_DISCLOSURE
+                    previous = next((str(m.get('text') or '') for m in reversed(session['messages'][:-1])
+                                     if m.get('kind', 'text') == 'text' and str(m.get('text') or '').strip()), '')
+                    typed = {**session, 'type': next((item['type'] for item in self.auto_allowlist
+                                if item['session_id'] == sid), 'unknown')}
+                    claimed = self.auto_guard.claim_backlog(typed, target, self.auto_policy, reply,
+                                acknowledged=True, incoming_text=target.get('text', '')) if previous else None
+                    if not claimed or not claimed.allow:
+                        self.catchup = {'session_id': sid, 'status': 'skipped',
+                                        'reason': '重复、限额、草稿或可见上下文未通过发送边界。'}
+                        self.catchup_busy = False
+                        self._auto_record(sid, 'skipped', '发送边界未通过')
+                    else:
+                        try:
+                            self._save_auto_state()
+                            sender = target.get('sender', '') if typed['type'] == 'group' else ''
+                            self.catchup = {'session_id': sid, 'status': 'sending',
+                                            'reason': '正在重新核验微信当前窗口与输入框。'}
+                            future = self.pool.submit(self.capture.send, reply, session['title'],
+                                                      target.get('text', ''), sender, previous)
+                            future.add_done_callback(lambda done: self._emit_catchup_sent(serial, sid, done))
+                        except Exception:
+                            self.catchup = {'session_id': sid, 'status': 'failed',
+                                            'reason': '无法安全保存或启动发送任务。'}
+                            self.catchup_busy = False
+                            self._auto_record(sid, 'failed', '发送任务未启动')
+        self.emit()
+
+    def _emit_catchup_sent(self, serial, sid, future):
+        if self.closed or future.cancelled():
+            return
+        try:
+            self.catchUpSent.emit(serial, sid, future.result(), None)
+        except Exception as exc:
+            self.catchUpSent.emit(serial, sid, None, self.safe_error(exc))
+
+    def _on_catchup_sent(self, serial, sid, result, error):
+        if self.closed or serial != self.catchup_serial or not self.catchup_busy:
+            return
+        self.catchup_busy = False
+        status = result.get('status') if isinstance(result, dict) else None
+        if status == 'sent':
+            self.catchup = {'session_id': sid, 'status': 'sent',
+                            'reason': '已在当前微信窗口识别到对应的发出气泡。'}
+            self._auto_record(sid, 'sent', '一次性历史补回已出现发出气泡')
+        elif status == 'sent_unconfirmed':
+            self.catchup = {'session_id': sid, 'status': 'failed',
+                            'reason': '已按下发送键，但未确认发出；请检查微信，系统不会重试。'}
+            self._auto_record(sid, 'failed', '发送结果不确定，未重试')
+        else:
+            self.catchup = {'session_id': sid, 'status': 'failed',
+                            'reason': '发送前核验未通过或任务失败；没有自动重试。'}
+            self._auto_record(sid, 'failed', '发送前核验失败')
         self._save_auto_state()
         self.emit()
 
@@ -760,6 +932,8 @@ class Controller(QObject):
             return self._stop_auto(pause=True)
         if method == 'stop_auto_reply':
             return self._stop_auto(emergency=bool(params.get('emergency')))
+        if method == 'catch_up_auto_reply':
+            return self._catch_up_once(params)
         if method == 'list_sessions':
             config = self.store.full_config()
             # The worker must not iterate mutable Qt-owned session state.

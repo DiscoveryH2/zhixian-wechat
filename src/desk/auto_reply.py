@@ -219,6 +219,49 @@ class AutoReplyGuard:
         del self._pending[key]
         return Decision(True, "claimed")
 
+    def claim_backlog(self, session: Any, message: Any, policy: Mapping[str, Any],
+                      candidate: str, *, acknowledged=False, now: Any = None,
+                      incoming_text: str = "") -> Decision:
+        """Consume one explicitly requested historical catch-up reply.
+
+        This bypasses only the live-event requirement. It still shares the
+        live sender's deduplication, cooldown and rate counters.
+        """
+        if acknowledged is not True:
+            return Decision(False, "backlog_not_acknowledged")
+        sid = self._session_id(session)
+        allowed_sessions = policy.get("session_ids", ())
+        if (not sid or not isinstance(allowed_sessions, (list, tuple, set, frozenset)) or
+                sid not in {str(value) for value in allowed_sessions}):
+            return Decision(False, "session_not_opted_in")
+        if self._session_kind(session, message, {}) == "unknown":
+            return Decision(False, "unknown_session_type")
+        if _get(message, "side", default=None) != "other" or not str(_get(message, "text", default="") or "").strip():
+            return Decision(False, "not_unanswered_inbound")
+        key = "backlog:" + self._message_key(sid, message, {})
+        if key == "backlog:":
+            return Decision(False, "missing_event_identity")
+        if key in self._seen_set:
+            return Decision(False, "duplicate_event")
+        safe = self.assess_candidate(candidate, incoming_text)
+        if not safe.allow:
+            return safe
+        timestamp = _now_epoch(now)
+        cooldown = max(0.0, float(policy.get("cooldown_seconds", 60) or 0))
+        last = self._last_by_session.get(sid)
+        if last is not None and timestamp - last < cooldown:
+            return Decision(False, "cooldown", last + cooldown)
+        hour_count = sum(1 for item in self._sent if timestamp - item["at"] < 3600)
+        day_count = sum(1 for item in self._sent if timestamp - item["at"] < 86400)
+        if hour_count >= max(0, int(policy.get("hourly_limit", 10))):
+            return Decision(False, "hourly_limit")
+        if day_count >= max(0, int(policy.get("daily_limit", 30))):
+            return Decision(False, "daily_limit")
+        self._remember(key)
+        self._sent.append({"at": timestamp, "session_id": sid})
+        self._last_by_session[sid] = timestamp
+        return Decision(True, "claimed")
+
     def snapshot(self) -> dict[str, Any]:
         """Return JSON-serializable guard state; callers choose where to store it."""
         return {"version": self.STATE_VERSION, "seen": list(self._seen),

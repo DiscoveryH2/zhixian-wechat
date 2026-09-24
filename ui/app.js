@@ -52,7 +52,7 @@
   const pending = new Map();
   let bridge = null, counter = 0, page = 'workspace', compact = window.innerWidth <= 640, online = false, search = '', currentState;
   let renderQueued = false, experience = null, lastWorkspaceKey = null, lastAutoReplyKey = null;
-  const blank = () => ({ config: { base_url: '', model_name: '', has_api_key: false, reply_model: '', reply_base_url: '', has_reply_api_key: false, relationship: '朋友', style: '自然简洁', auto_analyze: true, context_limit: 30, save_history: false, always_on_top: false, source: 'ocr', weflow_url: 'http://127.0.0.1:5031', weflow_has_token: false, debounce_ms: 1800 }, status: { capture: 'idle', analysis: 'idle', detail: '等待开始读取微信', last_error: '', source: 'ocr', connected: false }, auto_reply: { enabled: false, paused: false, status: 'off', detail: '', allowlist: [], group_mode: 'mention_only', debounce_seconds: 4, cooldown_seconds: 45, hourly_limit: 8, daily_limit: 40, sent_hour: 0, sent_day: 0, recent: [] }, sessions: [], current_session: null, analysis: null, notes: [], contacts: [], version: '1.3.0' });
+  const blank = () => ({ config: { base_url: '', model_name: '', has_api_key: false, reply_model: '', reply_base_url: '', has_reply_api_key: false, relationship: '朋友', style: '自然简洁', auto_analyze: true, context_limit: 30, save_history: false, always_on_top: false, source: 'ocr', weflow_url: 'http://127.0.0.1:5031', weflow_has_token: false, debounce_ms: 1800 }, status: { capture: 'idle', analysis: 'idle', detail: '等待开始读取微信', last_error: '', source: 'ocr', connected: false }, auto_reply: { enabled: false, paused: false, status: 'off', detail: '', allowlist: [], group_mode: 'mention_only', debounce_seconds: 4, cooldown_seconds: 45, hourly_limit: 8, daily_limit: 40, sent_hour: 0, sent_day: 0, recent: [] }, sessions: [], current_session: null, analysis: null, notes: [], contacts: [], version: '1.4.0' });
   currentState = blank();
   const configured = () => currentState.config.has_api_key && currentState.config.base_url && currentState.config.model_name;
   const live = () => ['live', 'searching'].includes(currentState.status.capture);
@@ -140,7 +140,7 @@
     chip.className = `status-chip ${autoReplyLabel ? `auto-reply-chip ${autoReply.enabled && !autoReply.paused ? 'running' : autoReply.status === 'emergency' ? 'error' : ''}` : status.analysis === 'running' ? 'running' : status.capture === 'live' ? 'live' : status.capture === 'error' ? 'error' : ''}`;
     $('#footer-status').textContent = status.detail || '本地工作台已就绪';
     $('#footer-meta').textContent = currentState.config.model_name ? `${currentState.config.model_name} · ${sourceLabel(currentState.config.source)}` : 'Jev · 语境与判断';
-    $('#version').textContent = String(currentState.version || '1.3.0');
+    $('#version').textContent = String(currentState.version || '1.4.0');
     $('#demo-label').hidden = !demo;
     $('#mini-expand').hidden = !compact;
     renderNavigation();
@@ -148,7 +148,7 @@
   function render(force = false) {
     renderChrome();
     const workspaceKey = page === 'workspace' ? JSON.stringify({ compact, configured: Boolean(configured()), source: currentState.config.source, session: currentState.current_session, analysis: currentState.analysis, capture: currentState.status.capture, analyzing: currentState.status.analysis, error: currentState.status.last_error }) : null;
-    const autoReplyKey = page === 'auto-reply' ? JSON.stringify(currentState.auto_reply) : null;
+    const autoReplyKey = page === 'auto-reply' ? JSON.stringify({ auto_reply: currentState.auto_reply, visible_session_id: currentState.current_session?.id || null, visible_session_active: Boolean(currentState.current_session?.active) }) : null;
     // Catalog warming/import progress must not rebuild chat bubbles or interrupt audio.
     if (page === 'workspace' && !force && workspaceKey === lastWorkspaceKey) return;
     if (page === 'auto-reply' && !force && autoReplyKey === lastAutoReplyKey) return;
@@ -508,6 +508,14 @@
     else if (method === 'start_auto_reply') { if (params.acknowledge_send !== true) throw new Error('启动前需要确认自动发送提示。'); demoSnapshot.auto_reply.enabled = true; demoSnapshot.auto_reply.paused = false; demoSnapshot.auto_reply.status = 'running'; demoSnapshot.auto_reply.detail = '演示模式 · 状态为合成数据，不会连接微信或发送消息。'; }
     else if (method === 'pause_auto_reply') { demoSnapshot.auto_reply.enabled = true; demoSnapshot.auto_reply.paused = true; demoSnapshot.auto_reply.status = 'paused'; demoSnapshot.auto_reply.detail = '演示模式 · 自动回复已暂停，没有发送消息。'; }
     else if (method === 'stop_auto_reply') { if (params.emergency !== true) throw new Error('紧急停止需要确认。'); demoSnapshot.auto_reply.enabled = false; demoSnapshot.auto_reply.paused = false; demoSnapshot.auto_reply.status = 'emergency'; demoSnapshot.auto_reply.detail = '演示模式 · 自动回复已紧急停止，没有发送消息。'; }
+    else if (method === 'catch_up_auto_reply') {
+      if (params.acknowledge_send !== true) throw new Error('运行单次历史补回前需要确认。');
+      const session = demoSnapshot.auto_reply.allowlist.find(item => item.session_id === params.session_id);
+      if (!session) throw new Error('只能选择已加入允许名单的合成会话。');
+      demoSnapshot.auto_reply.catchup = { session_id: params.session_id, status: 'skipped', reason: 'demo_only' };
+      demoSnapshot.auto_reply.recent = [{ id: `demo-catchup-${Date.now()}`, title: session.title, is_group: Boolean(session.is_group), at: new Date().toISOString(), status: 'skipped', reason: 'demo_only' }, ...(demoSnapshot.auto_reply.recent || [])].slice(0, 30);
+      return { started: true };
+    }
     else if (method === 'analyze') {
       demoSnapshot.status.analysis = 'running'; setState(structuredClone(demoSnapshot));
       await new Promise(resolve => setTimeout(resolve, 1300));

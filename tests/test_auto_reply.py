@@ -119,6 +119,25 @@ class AutoReplyGuardTests(unittest.TestCase):
                          "candidate_too_long")
         self.assertTrue(self.guard.assess_candidate("收到，我稍后回复").allow)
 
+    def test_one_time_backlog_claim_shares_limits_and_never_replays(self):
+        historical = {"id": "old-1", "side": "other", "text": "还需要回复吗？", "historical": True}
+        policy = dict(self.policy, enabled=False)
+        self.assertEqual(self.guard.claim_backlog(self.session, historical, policy, "好的", now=1000).reason,
+                         "backlog_not_acknowledged")
+        self.assertTrue(self.guard.claim_backlog(self.session, historical, policy, "好的",
+                                                 acknowledged=True, now=1000).allow)
+        self.assertEqual(self.guard.claim_backlog(self.session, historical, policy, "好的",
+                                                   acknowledged=True, now=1001).reason,
+                         "duplicate_event")
+        next_message = {**historical, "id": "old-2"}
+        self.assertEqual(self.guard.claim_backlog(self.session, next_message, policy, "好的",
+                                                   acknowledged=True, now=1002).reason,
+                         "cooldown")
+        restored = AutoReplyGuard(self.guard.snapshot())
+        self.assertEqual(restored.claim_backlog(self.session, historical, policy, "好的",
+                                                acknowledged=True, now=1100).reason,
+                         "duplicate_event")
+
 
 if __name__ == "__main__":
     unittest.main()

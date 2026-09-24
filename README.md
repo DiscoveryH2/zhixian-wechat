@@ -6,7 +6,9 @@
 
 A Windows WeChat conversation assistant with local OCR, Jev judgments, reply drafts, and optional, tightly scoped automatic replies.
 
-**当前版本：1.3.0 预览版** · [下载 Windows 便携版](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.3.0) · [1.3.0 发行说明](docs/releases/1.3.0.md) · [快速开始](#快速开始) · [更新记录](CHANGELOG.md) · [隐私说明](docs/PRIVACY.md)
+**当前版本：1.4.0 预览版** · [下载 v1.4.0 预览版](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.4.0) · [1.4.0 发行说明](docs/releases/1.4.0.md) · [快速开始](#快速开始) · [更新记录](CHANGELOG.md) · [隐私说明](docs/PRIVACY.md)
+
+**1.4.0 预览版** 增加一次性历史补回复：用户必须明确选择当前可见的白名单会话，程序只评估其最近一个尚未回应的来信回合，至多发送一条。它不会遍历或切换其他会话。验证结果和限制见[1.4.0 发行说明](docs/releases/1.4.0.md)。
 
 ## 看看界面
 
@@ -44,7 +46,7 @@ A Windows WeChat conversation assistant with local OCR, Jev judgments, reply dra
 
 目标环境为 **Windows 10 / Windows 11、微信 Windows 4.x**。窗口布局、缩放和微信版本会影响 OCR；当前不提供 macOS 或 Linux 客户端。
 
-1. 从 [v1.3.0 预览版 Release](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.3.0) 下载 Windows 便携包，**完整解压**后运行 `Zhixian.exe`。便携版包含 Python 运行环境和离线 OCR 模型，不需要另装 Python、Node 或安卓手机，也不需要微信数据库密钥。需要已完成真机发送验证的稳定版时，可继续使用 [v1.2.0](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.2.0)。
+1. 从 [v1.4.0 预览版 Release](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.4.0) 下载 Windows 便携包，**完整解压**后运行 `Zhixian.exe`。便携版包含 Python 运行环境和离线 OCR 模型，不需要另装 Python、Node 或安卓手机，也不需要微信数据库密钥。需要已完成真机发送验证的稳定版时，可继续使用 [v1.2.0](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.2.0)。
 2. 在设置中填写下面三项，点击“测试连接”，确认结果后保存。
 3. 打开微信，进入需要辅助的聊天，保持窗口可见且未最小化，点击“开始观察”。默认会分析新收到的文字；可以暂停观察或关闭自动分析，改为手动分析。
 
@@ -75,7 +77,7 @@ A Windows WeChat conversation assistant with local OCR, Jev judgments, reply dra
 - **手动分析**：粘贴文字对话，使用 `我：` / `对方：` 区分发言人。
 - **可选数据源**：已有兼容版 WeFlow 的用户可以通过本机 HTTP / SSE 读取消息。
 
-Jev 的意图、风险和概率是**基于有限上下文的模型估计**，不代表对方的真实想法，也不保证回复效果。上游 `should_reply_now` 关注下一条回复是否应包含实质内容，不是自动发送或立即发送的指令。自动回复的适用条件、限制和验证状态见[1.3.0 发行说明](docs/releases/1.3.0.md)。
+Jev 的意图、风险和概率是**基于有限上下文的模型估计**，不代表对方的真实想法，也不保证回复效果。上游 `should_reply_now` 关注下一条回复是否应包含实质内容，不是自动发送或立即发送的指令。自动回复与一次性历史补回复的适用条件、限制和验证状态见[1.4.0 发行说明](docs/releases/1.4.0.md)。
 
 ## 三种数据来源，三个范围
 

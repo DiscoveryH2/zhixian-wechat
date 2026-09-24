@@ -106,6 +106,10 @@ html[data-theme="night"] .moment-media-tile { background: #243a29; border-color:
 .auto-reply-status.paused { border-color:#d6c395;background:#fffaf0; }.auto-reply-status.paused .auto-reply-status-icon { color:#9a7840;background:#f6edda; }
 .auto-reply-status.error { border-color:#d69b8e;background:#fff6f3; }.auto-reply-status.error .auto-reply-status-icon { color:#a54c3f;background:#f8e4df; }
 .auto-reply-settings,.auto-reply-recent { padding:22px; margin-bottom:17px; }
+.auto-reply-catchup { padding:22px; margin-bottom:17px; border-color:#d8c08f; }
+.auto-reply-catchup-select { max-width:520px; margin-bottom:8px; }
+.auto-reply-catchup-hint { max-width:800px; line-height:1.75; margin:0 0 13px; }
+.auto-reply-catchup-state { margin-top:10px; color:var(--scene-muted); font-size:10px; line-height:1.6; }
 .auto-reply-section-head { display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:13px; }.auto-reply-section-head h2 { font-size:16px; }
 .auto-reply-explainer { margin:-3px 0 13px;max-width:800px;line-height:1.75; }
 .auto-reply-allowlist { display:grid;grid-template-columns:repeat(auto-fill,minmax(235px,1fr));gap:8px;margin-bottom:20px; }
@@ -124,6 +128,7 @@ html[data-theme="night"] .moment-media-tile { background: #243a29; border-color:
 html[data-theme="night"] .auto-reply-status.active { background:linear-gradient(110deg,#253d2d,#203426);border-color:#4b7552; }html[data-theme="night"] .auto-reply-status.paused{background:#3b3526;border-color:#786743;}html[data-theme="night"] .auto-reply-page>.notice{background:#392f22;color:#d8c49c;border-color:#675337;}
 html[data-theme="night"] .auto-reply-status-icon,html[data-theme="night"] .auto-reply-avatar{background:#304631;color:#a6c298;}html[data-theme="night"] .auto-reply-avatar.group{background:#40422d;color:#c2c18e;}html[data-theme="night"] .auto-reply-outcome{background:#314732;color:#a7c99d;}html[data-theme="night"] .auto-reply-outcome.skipped{background:#413b2b;color:#d1bc8d;}html[data-theme="night"] .auto-reply-outcome.failed{background:#4a302d;color:#e0a59a;}html[data-theme="night"] .auto-reply-outcome.simulated{background:#293b50;color:#b5cee9;}
 html[data-theme="night"] .auto-reply-confirm-check{background:#3b3526;border-color:#76633f;color:#e0d0a9;}html[data-theme="night"] .catalog-multi-row.selected .catalog-choice{background:#2d482f;border-color:#577754;color:#b0d2a8;}
+html[data-theme="night"] .auto-reply-catchup { border-color:#76633f; }
 @media(max-width:650px){.auto-reply-status{grid-template-columns:40px minmax(0,1fr);}.auto-reply-status-actions{grid-column:1/-1;justify-content:flex-start;}.auto-reply-settings,.auto-reply-recent{padding:17px;}.auto-reply-event{grid-template-columns:65px minmax(0,1fr) auto;gap:8px;}.auto-reply-event-reason{grid-column:2;grid-row:2;}.auto-reply-event time{grid-column:3;grid-row:1;}.auto-reply-form-footer{align-items:flex-start;}.auto-reply-form-footer .field-hint{max-width:65%;}.auto-reply-section-head{align-items:flex-start;}}
 html[data-theme="night"] .status-chip.auto-reply-chip{background:#29452f;border-color:#547e59;color:#b9dbb1;}html[data-theme="night"] .status-chip.auto-reply-chip.error{background:#4b302e;border-color:#82564f;color:#e6b6ac;}
 
