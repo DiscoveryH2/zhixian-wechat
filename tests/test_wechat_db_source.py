@@ -6,6 +6,7 @@ from contextlib import closing
 from pathlib import Path
 
 from desk.wechat_db_source import WeChatDBSource, WeChatDBError, _kind
+from core.backlog import prefilter_backlog
 
 
 def _msg_table(session):
@@ -37,7 +38,7 @@ def _snapshot(root):
     con = sqlite3.connect(contact / "contact.db")
     con.execute("CREATE TABLE contact (user_name TEXT, nick_name TEXT, remark TEXT)")
     con.executemany("INSERT INTO contact VALUES (?, ?, ?)", [
-        ("wxid_friend", "羽", "王松羽"), ("room@chatroom", "龙虎豹", "")])
+        ("wxid_friend", "甲", "合成好友甲"), ("room@chatroom", "合成群聊甲", "")])
     con.execute("CREATE TABLE name2id(user_name TEXT)")
     con.execute("INSERT INTO name2id(user_name) VALUES ('wxid_friend')")
     con.commit()
@@ -90,9 +91,9 @@ class WeChatDBSourceTests(unittest.TestCase):
         source = WeChatDBSource(self.snapshot, self_wxid="wxid_self")
         self.assertEqual([p.name for p in source.message_dbs], ["message_0.db", "message_2.db"])
         sessions = {row["id"]: row for row in source.sessions()}
-        self.assertEqual(sessions["wxid_friend"]["name"], "王松羽")
+        self.assertEqual(sessions["wxid_friend"]["name"], "合成好友甲")
         self.assertEqual(sessions["wxid_friend"]["type"], "private")
-        self.assertEqual(sessions["room@chatroom"]["name"], "龙虎豹")
+        self.assertEqual(sessions["room@chatroom"]["name"], "合成群聊甲")
         self.assertEqual(sessions["room@chatroom"]["type"], "group")
         self.assertTrue(sessions["room@chatroom"]["historical"])
 
@@ -124,6 +125,20 @@ class WeChatDBSourceTests(unittest.TestCase):
         sides = {row["text"]: row["side"] for row in rows}
         self.assertEqual(sides["合成发出"], "me")
         self.assertEqual(sides["无法确认方向"], "unknown")
+
+    def test_group_at_matches_only_configured_self_display_name(self):
+        _create_shard(self.snapshot, 4, {"room@chatroom": [
+            (3, 203, 700, 7000, 1, 2, "@合成本人X 这条不是发给我", 0),
+            (4, 204, 800, 8000, 1, 2, "@合成本人 能回答这个问题吗？", 0),
+        ]})
+        source = WeChatDBSource(self.snapshot, self_wxid="wxid_self", self_display_name="合成本人")
+        rows = source.messages("room@chatroom", limit=4)
+        directed = {row["text"]: row.get("directed_to_me") for row in rows if row["kind"] == "text"}
+        self.assertFalse(directed["@合成本人X 这条不是发给我"])
+        self.assertTrue(directed["@合成本人 能回答这个问题吗？"])
+        latest = rows[0]
+        self.assertTrue(prefilter_backlog([latest], chat_type="group", group_mode="mention_only",
+            require_prior_self=False, now=8001)["eligible"])
 
     def test_paging_cursor_is_exclusive_and_limit_is_bounded(self):
         source = WeChatDBSource(self.snapshot, max_limit=2)
@@ -201,7 +216,7 @@ class WeChatDBSourceTests(unittest.TestCase):
         first = source.sessions(limit=1)
         second = source.sessions(limit=1, offset=1)
         self.assertEqual(first[0]["id"], "room@chatroom")
-        self.assertEqual(first[0]["name"], "龙虎豹")
+        self.assertEqual(first[0]["name"], "合成群聊甲")
         self.assertEqual(first[0]["preview"], "合成群聊预览")
         self.assertEqual(first[0]["type"], "group")
         self.assertEqual(second[0]["id"], "wxid_other")

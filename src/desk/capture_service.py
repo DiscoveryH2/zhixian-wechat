@@ -6,6 +6,8 @@ run without Windows, OCR, Qt, or an installed capture backend.
 from __future__ import annotations
 
 from collections import deque
+from contextlib import contextmanager
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -320,7 +322,8 @@ class CaptureService:
         from desk.wechat_sqlcipher import discover_cipher_source
         from desk.wechat_db_source import WeChatDBSource
         account, db_storage, connect_factory = discover_cipher_source()
-        return WeChatDBSource(db_storage, self_wxid=account.wxid, connect_factory=connect_factory)
+        return WeChatDBSource(db_storage, self_wxid=account.wxid,
+                              self_display_name=account.display_name, connect_factory=connect_factory)
 
     @staticmethod
     def _db_head_marker(head):
@@ -439,7 +442,16 @@ class CaptureService:
                 self._once.clear()
                 return
             try:
-                current_heads = source.latest_session_heads(limit=500)
+                current_heads = []
+                page_offset = 0
+                while self._wanted.is_set() and not self._stop.is_set() and not self._restart.is_set():
+                    page = source.latest_session_heads(limit=500, offset=page_offset)
+                    current_heads.extend(page)
+                    page_offset += len(page)
+                    if len(page) < 500:
+                        break
+                    if page_offset >= 100000:
+                        raise RuntimeError('微信会话数量超过当前监测上限')
                 for head in current_heads:
                     if not isinstance(head, dict):
                         continue
@@ -743,7 +755,43 @@ class CaptureService:
             pass
         return result
 
+    @contextmanager
+    def _temporary_db_send_window(self):
+        """Reveal a tray-hidden/minimized WeChat only for recipient verification."""
+        from app.winapi import libraries, process_name, window_title
+
+        user32, _, _ = libraries()
+        candidates = []
+
+        @ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+        def visit(hwnd, _):
+            if (process_name(hwnd) in ("weixin.exe", "wechat.exe")
+                    and window_title(hwnd) in ("微信", "WeChat", "Weixin")):
+                candidates.append(hwnd)
+            return True
+
+        user32.EnumWindows(visit, 0)
+        if len(candidates) != 1:
+            raise RuntimeError("无法唯一定位微信主窗口，已拒绝发送")
+        hwnd = candidates[0]
+        was_visible, was_minimized = bool(user32.IsWindowVisible(hwnd)), bool(user32.IsIconic(hwnd))
+        if not was_visible or was_minimized:
+            user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
+        try:
+            if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+                raise RuntimeError("无法恢复微信目标窗口，已拒绝发送")
+            yield hwnd
+        finally:
+            if was_minimized:
+                user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+            elif not was_visible:
+                user32.ShowWindow(hwnd, 0)  # SW_HIDE
+
     def _send_db_worker(self, task):
+        with self._temporary_db_send_window() as expected_hwnd:
+            return self._send_db_visible_worker(task, expected_hwnd)
+
+    def _send_db_visible_worker(self, task, expected_hwnd):
         """Use DB for chat state; inspect only WeChat's title and composer."""
         from app.auto_send import send_verified, _assert_target, _press_enter
         from app.capture import chat_area
@@ -782,6 +830,9 @@ class CaptureService:
         self._close_capture()
         self._ensure_capture()
         hwnd, native = self._hwnd, self._native_title
+        if hwnd != expected_hwnd:
+            self._close_capture()
+            raise RuntimeError("微信目标窗口发生变化，已拒绝发送")
         u, _, _ = libraries()
 
         def target_frame():

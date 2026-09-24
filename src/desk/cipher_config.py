@@ -32,6 +32,7 @@ class CipherTalkAccount:
     db_root: Path
     wxid: str
     db_key: str = field(repr=False)
+    display_name: str = field(default="", repr=False)
 
 
 _KEY_RE = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -121,7 +122,7 @@ def _json_value(raw: str | None, label: str):
         raise CipherTalkConfigError(f"CipherTalk {label} config is malformed") from exc
 
 
-def _usable_account(record: object) -> tuple[Path, str, str] | None:
+def _usable_account(record: object) -> tuple[Path, str, str, str] | None:
     if not isinstance(record, dict):
         return None
     root_raw = record.get("dbPath")
@@ -164,7 +165,9 @@ def _usable_account(record: object) -> tuple[Path, str, str] | None:
         return None
     if not _WXID_RE.fullmatch(wxid):
         return None
-    return resolved, wxid, key
+    label = record.get("displayName")
+    display_name = label.strip()[:80] if isinstance(label, str) and not any(ord(ch) < 32 for ch in label) else ""
+    return resolved, wxid, key, display_name
 
 
 def discover_ciphertalk_account(
@@ -190,8 +193,8 @@ def discover_ciphertalk_account(
         for item in ordered:
             usable = _usable_account(item)
             if usable:
-                root, wxid, key = usable
-                return CipherTalkAccount(root, wxid, key)
+                root, wxid, key, display_name = usable
+                return CipherTalkAccount(root, wxid, key, display_name)
 
     # Older CipherTalk builds stored a single account in top-level config keys.
     legacy = {
@@ -201,6 +204,6 @@ def discover_ciphertalk_account(
     }
     usable = _usable_account(legacy)
     if usable:
-        root, wxid, key = usable
-        return CipherTalkAccount(root, wxid, key)
+        root, wxid, key, display_name = usable
+        return CipherTalkAccount(root, wxid, key, display_name)
     raise CipherTalkConfigError("No active CipherTalk account has a valid key and existing database root")

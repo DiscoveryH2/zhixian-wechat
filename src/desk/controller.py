@@ -372,7 +372,8 @@ class Controller(QObject):
     def _auto_dispatch(self, trigger, result, judged):
         sid = trigger['session_id']
         if (not self.auto_policy['enabled'] or self.auto_paused or self.auto_send_busy or
-                trigger['epoch'] != self.auto_epoch or sid != self.live_id or
+                trigger['epoch'] != self.auto_epoch or
+                (trigger['event'].get('source') != 'wechat_db' and sid != self.live_id) or
                 self.status['capture'] != 'live'):
             self._auto_record(sid, 'skipped', '会话或自动回复状态已变化')
             return
@@ -388,7 +389,8 @@ class Controller(QObject):
                 judged.get('target_message_id') != trigger['message']['id']):
             self._auto_record(sid, 'skipped', 'Jev 未明确认为现在值得回复这条消息')
             return
-        if trigger['type'] == 'group' and self.auto_policy['group_mode'] == 'all':
+        if (trigger['type'] == 'group' and self.auto_policy['group_mode'] == 'all'
+                and trigger['message'].get('directed_to_me') is not True):
             confidence = judged.get('confidence')
             if (isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or
                     confidence < 0.85):
@@ -476,7 +478,8 @@ class Controller(QObject):
             return
         sid = deferred['session_id']
         session = self.sessions.get(sid)
-        if (sid != self.live_id or not session or not session.get('messages') or
+        if ((deferred['source'] != 'wechat_db' and sid != self.live_id)
+                or not session or not session.get('messages') or
                 session['messages'][-1].get('id') != deferred['message_id']):
             return
         message = session['messages'][-1]
@@ -749,7 +752,8 @@ class Controller(QObject):
     @staticmethod
     def _wechat_db_reader():
         account, storage, connections = discover_cipher_source()
-        return WeChatDBSource(storage, self_wxid=account.wxid, connect_factory=connections)
+        return WeChatDBSource(storage, self_wxid=account.wxid,
+                              self_display_name=account.display_name, connect_factory=connections)
 
     def _wechat_db_catalog_page(self, query, cursor, limit):
         state = self._read_catalog_cursor(cursor, 'wechat_db', query) if cursor else {'offset': 0}

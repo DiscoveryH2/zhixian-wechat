@@ -16,6 +16,38 @@ APP = QApplication.instance() or QApplication([])
 
 
 class ControllerDBAutoTests(unittest.TestCase):
+    def test_direct_group_at_uses_normal_confidence_gate(self):
+        with tempfile.TemporaryDirectory() as temp, patch("desk.capture_service.CaptureService") as capture_type:
+            ctrl = Controller(Path(temp))
+            try:
+                sid = "synthetic@chatroom"
+                previous = {"id": "group-old", "text": "之前聊过", "side": "me", "kind": "text"}
+                incoming = {"id": "group-new", "text": "@合成本人 这个问题怎么办？", "side": "other",
+                            "sender": "wxid-friend", "kind": "text", "historical": False,
+                            "directed_to_me": True}
+                ctrl.store.config["source"] = "wechat_db"
+                ctrl.sessions[sid] = {"id": sid, "title": "合成群聊", "source": "wechat_db",
+                                      "type": "group", "messages": [previous, incoming]}
+                ctrl.live_id = "another-session"
+                ctrl.status["capture"] = "live"
+                ctrl.auto_allowlist = [{"session_id": sid, "title": "合成群聊", "type": "group",
+                                        "source": "wechat_db"}]
+                ctrl.auto_policy.update(enabled=True, session_ids=[sid], group_mode="all")
+                trigger = {"session_id": sid, "message": incoming,
+                           "event": {"source": "wechat_db", "historical": False, "incoming": True},
+                           "epoch": ctrl.auto_epoch, "type": "group"}
+                analysis = {"risk": 1, "candidates": [{"text": "我可以帮你看看"}], "best_index": 0}
+                judgment = {"should_reply": True, "target_message_id": incoming["id"], "confidence": .6}
+                completed = Future()
+                completed.set_result({"status": "sent_unconfirmed"})
+                with patch.object(ctrl.auto_guard, "claim", return_value=Decision(True, "claimed")), \
+                     patch.object(ctrl.pool, "submit", return_value=completed) as submit:
+                    ctrl._auto_dispatch(trigger, analysis, judgment)
+                self.assertIs(submit.call_args.args[0], capture_type.return_value.send_db)
+                self.assertEqual(submit.call_args.args[2:], (sid, incoming["id"]))
+            finally:
+                ctrl.close()
+
     def test_database_event_dispatches_db_sender_with_disclosure(self):
         with tempfile.TemporaryDirectory() as temp, patch("desk.capture_service.CaptureService") as capture_type:
             ctrl = Controller(Path(temp))
@@ -27,7 +59,7 @@ class ControllerDBAutoTests(unittest.TestCase):
                 ctrl.store.config["source"] = "wechat_db"
                 ctrl.sessions[sid] = {"id": sid, "title": "合成联系人", "source": "wechat_db",
                                       "type": "private", "messages": [earlier, incoming]}
-                ctrl.live_id = sid
+                ctrl.live_id = "another-session-updated-after-this-one"
                 ctrl.status["capture"] = "live"
                 ctrl.auto_allowlist = [{"session_id": sid, "title": "合成联系人", "type": "private",
                                         "source": "wechat_db"}]

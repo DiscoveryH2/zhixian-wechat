@@ -6,9 +6,9 @@
 
 A Windows WeChat conversation assistant with read-only local SQLCipher history, optional OCR, Jev judgments, reply drafts, and tightly scoped automatic replies.
 
-**当前版本：1.5.0 预览版** · [下载 v1.5.0 预览版](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.5.0) · [1.5.0 发行说明](docs/releases/1.5.0.md) · [快速开始](#快速开始) · [更新记录](CHANGELOG.md) · [隐私说明](docs/PRIVACY.md)
+**当前版本：1.5.1 预览版** · [下载 v1.5.1 预览版](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.5.1) · [1.5.1 发行说明](docs/releases/1.5.1.md) · [快速开始](#快速开始) · [更新记录](CHANGELOG.md) · [隐私说明](docs/PRIVACY.md)
 
-**1.5.0 预览版** 增加微信 4.x 本机加密数据库只读来源。已有 CipherTalk 账号配置的用户可在知弦选择“本机微信数据库”，浏览多会话与历史分页，并基于数据库新消息触发分析；聊天正文不再依赖截图 OCR。自动发送仍要求目标会话当前在微信窗口中可唯一核验，使用数据库复核最新入站消息，只识别标题与输入框。真实发送验收状态见[1.5.0 发行说明](docs/releases/1.5.0.md)。
+**1.5.1 预览版** 支持微信保持登录但窗口最小化或收至托盘时读取数据库新消息；只有明确 `@` 本人显示名的群聊消息才会标为直接发给你。发送时若目标会话原本已打开，知弦可临时恢复微信窗口核验标题与输入框，结束后恢复窗口状态。真实发送验收状态见[1.5.1 发行说明](docs/releases/1.5.1.md)。
 
 ## 看看界面
 
@@ -46,9 +46,9 @@ A Windows WeChat conversation assistant with read-only local SQLCipher history, 
 
 目标环境为 **Windows 10 / Windows 11、微信 Windows 4.x**。本机数据库模式需要当前 Windows 用户已有可用的 CipherTalk 账号配置；窗口布局、缩放和微信版本仍会影响可见会话的发送核验。当前不提供 macOS 或 Linux 客户端。
 
-1. 从 [v1.5.0 预览版 Release](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.5.0) 下载 Windows 便携包，**完整解压**后运行 `Zhixian.exe`。便携版包含 Python、SQLCipher 和离线 OCR 运行环境，不需要另装 Python、Node 或安卓手机。
+1. 从 [v1.5.1 预览版 Release](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.5.1) 下载 Windows 便携包，**完整解压**后运行 `Zhixian.exe`。便携版包含 Python、SQLCipher 和离线 OCR 运行环境，不需要另装 Python、Node 或安卓手机。
 2. 在设置中填写下面三项，点击“测试连接”，确认结果后保存。
-3. 若已有 CipherTalk 账号配置，在设置中选择“本机微信数据库”，点击“开始观察”；打开会话目录选择要分析的联系人或群聊。数据库读取不要求聊天窗口保持可见。自动发送时仍需让微信窗口显示目标会话，以便核验标题与输入框。没有该配置时可继续使用默认 OCR、WeFlow 或导入记录。
+3. 若已有 CipherTalk 账号配置，在设置中选择“本机微信数据库”，点击“开始观察”；打开会话目录选择要分析的联系人或群聊。数据库读取可在微信最小化或收至托盘时继续；自动发送仅处理微信原本已打开的目标会话，届时知弦会短暂恢复窗口核验。没有该配置时可继续使用默认 OCR、WeFlow 或导入记录。
 
 **知弦本身只要求 Jev 的 Key、Base URL 和模型名。** 本机数据库模式复用当前 Windows 用户已配置的 CipherTalk 数据库路径与密钥；知弦不会要求再次粘贴数据库密钥，也不会调用 CipherTalk 的闭源 DLL。新机器若没有这份现成配置，需先建立可用的数据来源。
 
@@ -77,7 +77,7 @@ A Windows WeChat conversation assistant with read-only local SQLCipher history, 
 - **手动分析**：粘贴文字对话，使用 `我：` / `对方：` 区分发言人。
 - **其他数据源**：已有兼容版 WeFlow 的用户仍可通过本机 HTTP / SSE 读取消息。
 
-Jev 的意图、风险和概率是**基于有限上下文的模型估计**，不代表对方的真实想法，也不保证回复效果。上游 `should_reply_now` 关注下一条回复是否应包含实质内容，不是自动发送或立即发送的指令。自动回复与一次性历史补回复的适用条件、限制和验证状态见[1.5.0 发行说明](docs/releases/1.5.0.md)。
+Jev 的意图、风险和概率是**基于有限上下文的模型估计**，不代表对方的真实想法，也不保证回复效果。上游 `should_reply_now` 关注下一条回复是否应包含实质内容，不是自动发送或立即发送的指令。自动回复与一次性历史补回复的适用条件、限制和验证状态见[1.5.1 发行说明](docs/releases/1.5.1.md)。
 
 ## 数据来源与范围
 
@@ -96,7 +96,7 @@ Jev 的意图、风险和概率是**基于有限上下文的模型估计**，不
 
 在设置中选择“本机微信数据库”。知弦只读打开 `%APPDATA%/ciphertalk/ciphertalk-config.db` 找到当前账号，再用开源 SQLCipher 直接连接微信原始加密数据库及其 WAL。数据库密钥仅在程序内存中传递，不写入知弦配置、不上传，也不生成明文数据库镜像。没有可用配置时会显示不可用，而不会悄悄改用截图读取。
 
-会话目录按微信 `SessionTable` 的最近时间分页，联系人备注与群名用于显示；选中会话后再读取有界消息页。图片、语音目前只能显示类型占位，数据库中的媒体引用不等于原始文件或转写文本。自动回复的上下文来自数据库；发送前仅识别微信窗口的会话标题与输入框，不对聊天正文截图 OCR。当前只支持微信窗口已经显示目标会话的回复型发送，同名会话、最新来信变化、已有草稿或无法确认送达时会拒绝或暂停，不会盲目导航到其他聊天。
+会话目录按微信 `SessionTable` 的最近时间分页，联系人备注与群名用于显示；选中会话后再读取有界消息页。图片、语音目前只能显示类型占位，数据库中的媒体引用不等于原始文件或转写文本。自动回复的上下文来自数据库；发送前仅识别微信窗口的会话标题与输入框，不对聊天正文截图 OCR。若目标会话原本已打开但微信收在托盘，知弦会短暂恢复窗口核验后再恢复；同名会话、最新来信变化、已有草稿或无法确认送达时会拒绝或暂停，不会盲目导航到其他聊天。
 
 ### 导入 ChatLab
 

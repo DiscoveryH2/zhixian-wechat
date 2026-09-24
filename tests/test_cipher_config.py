@@ -39,15 +39,19 @@ class CipherTalkConfigDiscoveryTests(unittest.TestCase):
         }
 
     def test_finds_active_account_and_redacts_key_from_repr(self):
+        active = self.account("active")
+        active["displayName"] = "合成本人"
         self.write_config({
-            "accounts": [self.account("older", wxid="wxid_old"), self.account("active")],
+            "accounts": [self.account("older", wxid="wxid_old"), active],
             "activeAccountId": "active",
         })
         result = discover_ciphertalk_account(self.config)
         self.assertEqual(result.db_root, self.account_root.resolve())
         self.assertEqual(result.wxid, "wxid_test")
         self.assertEqual(result.db_key, self.key)
+        self.assertEqual(result.display_name, "合成本人")
         self.assertNotIn(self.key, repr(result))
+        self.assertNotIn("合成本人", repr(result))
 
     def test_accepts_ciphertalk_account_container_with_wxid_child_storage(self):
         (self.account_root / "wxid_test" / "db_storage").mkdir(parents=True)

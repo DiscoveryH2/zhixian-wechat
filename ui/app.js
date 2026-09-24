@@ -52,7 +52,7 @@
   const pending = new Map();
   let bridge = null, counter = 0, page = 'workspace', compact = window.innerWidth <= 640, online = false, search = '', currentState;
   let renderQueued = false, experience = null, lastWorkspaceKey = null, lastAutoReplyKey = null;
-  const blank = () => ({ config: { base_url: '', model_name: '', has_api_key: false, reply_model: '', reply_base_url: '', has_reply_api_key: false, relationship: '朋友', style: '自然简洁', auto_analyze: true, context_limit: 30, save_history: false, always_on_top: false, source: 'ocr', weflow_url: 'http://127.0.0.1:5031', weflow_has_token: false, debounce_ms: 1800 }, status: { capture: 'idle', analysis: 'idle', detail: '等待开始读取微信', last_error: '', source: 'ocr', connected: false }, auto_reply: { enabled: false, paused: false, status: 'off', detail: '', allowlist: [], group_mode: 'mention_only', debounce_seconds: 4, cooldown_seconds: 45, hourly_limit: 8, daily_limit: 40, sent_hour: 0, sent_day: 0, recent: [] }, sessions: [], current_session: null, analysis: null, notes: [], contacts: [], version: '1.5.0' });
+  const blank = () => ({ config: { base_url: '', model_name: '', has_api_key: false, reply_model: '', reply_base_url: '', has_reply_api_key: false, relationship: '朋友', style: '自然简洁', auto_analyze: true, context_limit: 30, save_history: false, always_on_top: false, source: 'ocr', weflow_url: 'http://127.0.0.1:5031', weflow_has_token: false, debounce_ms: 1800 }, status: { capture: 'idle', analysis: 'idle', detail: '等待开始读取微信', last_error: '', source: 'ocr', connected: false }, auto_reply: { enabled: false, paused: false, status: 'off', detail: '', allowlist: [], group_mode: 'mention_only', debounce_seconds: 4, cooldown_seconds: 45, hourly_limit: 8, daily_limit: 40, sent_hour: 0, sent_day: 0, recent: [] }, sessions: [], current_session: null, analysis: null, notes: [], contacts: [], version: '1.5.1' });
   currentState = blank();
   const configured = () => currentState.config.has_api_key && currentState.config.base_url && currentState.config.model_name;
   const live = () => ['live', 'searching'].includes(currentState.status.capture);
@@ -140,7 +140,7 @@
     chip.className = `status-chip ${autoReplyLabel ? `auto-reply-chip ${autoReply.enabled && !autoReply.paused ? 'running' : autoReply.status === 'emergency' ? 'error' : ''}` : status.analysis === 'running' ? 'running' : status.capture === 'live' ? 'live' : status.capture === 'error' ? 'error' : ''}`;
     $('#footer-status').textContent = status.detail || '本地工作台已就绪';
     $('#footer-meta').textContent = currentState.config.model_name ? `${currentState.config.model_name} · ${sourceLabel(currentState.config.source)}` : 'Jev · 语境与判断';
-    $('#version').textContent = String(currentState.version || '1.5.0');
+    $('#version').textContent = String(currentState.version || '1.5.1');
     $('#demo-label').hidden = !demo;
     $('#mini-expand').hidden = !compact;
     renderNavigation();
@@ -188,7 +188,7 @@
     const identity = append(el('div', 'session-identity'), el('div', 'avatar', current?.title?.slice(0, 1) || '弦'), append(el('div'), el('div', `session-name${!current ? ' session-empty-title' : ''}`, current?.title || '尚未选择会话'), append(el('div', 'session-caption'), el('span', live() && current ? 'live-label' : '', current ? `${current.messages?.length || 0} 条上下文` : '在微信中打开一段聊天'))));
     const sessionSelect = button('切换会话', 'search', () => experience.openCatalog(), 'small', !available());
     chat.append(append(el('div', 'panel-top'), identity, append(el('div', 'session-picker'), sessionSelect)));
-    chat.append(append(el('div', 'source-strip'), icon('window', 13), el('span', '', sourceLabel(current?.source || s.config.source)), el('span', '', '·'), el('span', '', current?.active ? '当前可见会话' : current ? '历史上下文' : '仅观察当前可见窗口')));
+    chat.append(append(el('div', 'source-strip'), icon('window', 13), el('span', '', sourceLabel(current?.source || s.config.source)), el('span', '', '·'), el('span', '', current?.source === 'wechat_db' ? '本机数据库会话' : current?.active ? '当前可见会话' : current ? '历史上下文' : '仅观察当前可见窗口')));
     const timeline = el('div', 'timeline'); timeline.dataset.session = current?.id || ''; timeline.setAttribute('role', 'log'); timeline.setAttribute('aria-label', '聊天记录');
     if (current?.messages?.length) {
       timeline.append(experience.historyControl(current), el('div', 'time-divider', '已读取的对话上下文'));
@@ -354,9 +354,9 @@
     const generation = el('section', 'advanced-section'); generation.append(el('h3', '', '候选回复生成（可选）'), el('p', 'field-hint', 'OpenRouter 接入可复用同一密钥，默认用 deepseek/deepseek-v4.1-flash 起草回复。TypeSafe 直连或自定义判断服务需另配生成模型，才能提供候选回复。'));
     generation.append(field('生成模型名称', 'reply_model', c.reply_model, { optional: true, placeholder: '留空：OpenRouter 使用默认回复模型' }), field('生成模型 Base URL', 'reply_base_url', c.reply_base_url, { optional: true, placeholder: '留空：按服务自动匹配' }), field('生成模型 API Key', 'reply_api_key', '', { type: 'password', optional: true, placeholder: c.has_reply_api_key ? '已保存，留空保留' : '留空：仅同服务复用主密钥' }));
     const source = el('section', 'advanced-section'); source.append(el('h3', '', '消息读取'));
-    source.append(field('读取来源', 'source', c.source === 'auto' ? 'ocr' : c.source, { options: [['ocr', '微信可见窗口（本地 OCR）'], ['wechat_db', '本机微信数据库（CipherTalk 已配置账号）'], ['weflow', '已有 WeFlow 本地服务']] }), el('p', 'field-hint', '数据库来源直接读取本机微信记录，无需截图；复用 CipherTalk 已配置账号，数据库密钥不会进入知弦设置。数据库读取接入状态以运行状态提示为准。切换会话后会重新建立上下文。'));
+    source.append(field('读取来源', 'source', c.source === 'auto' ? 'ocr' : c.source, { options: [['ocr', '微信可见窗口（本地 OCR）'], ['wechat_db', '本机微信数据库（CipherTalk 已配置账号）'], ['weflow', '已有 WeFlow 本地服务']] }), el('p', 'field-hint', '数据库来源在微信保持登录、窗口最小化或收至托盘时仍可读取新消息；复用 CipherTalk 已配置账号，数据库密钥不会进入知弦设置。切换会话后会重新建立上下文。'));
     source.append(field('WeFlow 地址', 'weflow_url', c.weflow_url, { optional: true, placeholder: 'http://127.0.0.1:5031' }), field('WeFlow 访问令牌', 'weflow_token', '', { type: 'password', optional: true, placeholder: c.weflow_has_token ? '已保存，留空保留' : '仅当你的服务需要验证时填写' }));
-    source.append(button('检查读取来源', 'refresh', async () => { const result = await rpc('refresh_sources'); const sources = Array.isArray(result) ? result : result?.sources; if (sources?.length) toast(sources.map(s => typeof s === 'string' ? s : s.title || s.name || s.source || '已发现窗口').join('；')); else toast(typeof result?.message === 'string' ? result.message : '已刷新来源。请确认微信窗口已打开。'); }, 'small', !available()));
+    source.append(button('检查读取来源', 'refresh', async () => { const result = await rpc('refresh_sources'); const sources = Array.isArray(result) ? result : result?.sources; if (sources?.length) toast(sources.map(s => typeof s === 'string' ? s : s.title || s.name || s.source || '已发现来源').join('；')); else toast(typeof result?.message === 'string' ? result.message : '已刷新来源，请检查所选数据源。'); }, 'small', !available()));
     const behavior = el('section', 'advanced-section'); behavior.append(el('h3', '', '分析与表达'));
     behavior.append(append(el('div', 'form-two'), field('默认关系', 'relationship', c.relationship, { placeholder: '朋友 / 同事 / 客户' }), field('表达风格', 'style', c.style, { placeholder: '自然、简洁、有分寸' })));
     behavior.append(field('群聊回复对象', 'reply_to', c.reply_to || '', { optional: true, placeholder: '例如：项目负责人', hint: '群聊中需要针对特定成员分析时填写，留空使用当前对话语境。' }));
@@ -366,7 +366,7 @@
     data.append(append(el('div', 'data-actions'), button('打开数据文件夹', 'folder', () => rpc('open_data_folder'), 'small', !available()), button('清除会话历史', 'trash', () => confirmDialog('清除会话历史', '此操作会清除本地保存的聊天上下文和分析记录，知识库、联系人和模型设置仍会保留。', async () => { await action('clear_history', {}, '会话历史已清除'); }), 'small danger', !available())));
     append(body, generation, source, behavior, data); advanced.append(body); form.append(advanced); configActions(form);
     const aside = el('aside', 'settings-aside');
-    for (const [idx, title, desc] of [['01', '模型负责判断', 'Jev 用对话语境理解意图、需求和风险。模型服务的实际能力决定可用的分析与生成功能。'], ['02', '窗口负责倾听', '保持电脑微信的聊天窗口可见。需要后台读取更多会话时，可切换到你已有的 WeFlow 服务。'], ['03', '你保留决定权', '知弦只给出分析和候选。点击回填时会校验当前会话，最终发送始终由你完成。']]) aside.append(append(el('div', 'settings-help'), el('div', 'help-index', idx), el('h3', '', title), el('p', '', desc)));
+    for (const [idx, title, desc] of [['01', '模型负责判断', 'Jev 用对话语境理解意图、需求和风险。模型服务的实际能力决定可用的分析与生成功能。'], ['02', '数据库负责倾听', '选择本机数据库后，微信保持登录即可在后台读取联系人和群聊新消息。'], ['03', '发送范围由你决定', '自动回复默认关闭；开启后仍受会话名单、Jev 判断、风险与发送核验约束。']]) aside.append(append(el('div', 'settings-help'), el('div', 'help-index', idx), el('h3', '', title), el('p', '', desc)));
     append(grid, form, aside); root.append(grid); return root;
   }
 

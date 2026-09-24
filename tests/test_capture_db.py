@@ -44,6 +44,30 @@ class FakeWechatDB:
 
 
 class WechatDBCaptureTests(unittest.TestCase):
+    def test_tray_hidden_window_is_restored_after_sender_check(self):
+        class FakeUser32:
+            visible = False
+            iconic = False
+            def EnumWindows(self, callback, value):
+                callback(123, value)
+            def IsWindowVisible(self, _hwnd):
+                return self.visible
+            def IsIconic(self, _hwnd):
+                return self.iconic
+            def ShowWindow(self, _hwnd, command):
+                self.visible = command != 0
+                return True
+
+        user32 = FakeUser32()
+        service = CaptureService(lambda *_: None)
+        with patch("app.winapi.libraries", return_value=(user32, None, None)), \
+             patch("app.winapi.process_name", return_value="weixin.exe"), \
+             patch("app.winapi.window_title", return_value="微信"):
+            with service._temporary_db_send_window() as hwnd:
+                self.assertEqual(hwnd, 123)
+                self.assertTrue(user32.visible)
+            self.assertFalse(user32.visible)
+
     def test_db_sender_rejects_outgoing_head_before_any_capture(self):
         fake = FakeWechatDB()
         fake.rows[-1]["side"] = "me"
@@ -54,7 +78,7 @@ class WechatDBCaptureTests(unittest.TestCase):
                 "cancelled": threading.Event(), "epoch": service._control_epoch}
         with patch.object(service, "_ensure_capture", side_effect=AssertionError("No screen read permitted")):
             with self.assertRaisesRegex(RuntimeError, "已有更新"):
-                service._send_db_worker(task)
+                service._send_db_visible_worker(task, expected_hwnd=0)
 
     def test_db_source_emits_initial_history_then_only_recent_new_inbound_text_live(self):
         fake = FakeWechatDB()

@@ -12,6 +12,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote
+from core.backlog import _explicit_mention
 
 
 _SHARD = re.compile(r"^message_[0-9]+\.db$", re.IGNORECASE)
@@ -99,10 +100,12 @@ class WeChatDBSource:
     """
 
     def __init__(self, db_storage: str | Path, self_wxid: str | None = None,
+                 self_display_name: str | None = None,
                  max_limit: int = _MAX_LIMIT,
                  connect_factory: Callable[[Path], sqlite3.Connection] | None = None):
         self.root = Path(db_storage).expanduser().resolve()
         self.self_wxid = str(self_wxid) if self_wxid else None
+        self.self_display_name = str(self_display_name or "").strip()[:80]
         self.max_limit = max(1, min(int(max_limit), _MAX_LIMIT))
         self.connect_factory = connect_factory
         self.message_dbs = self._discover_message_dbs()
@@ -506,6 +509,8 @@ class WeChatDBSource:
                                "side": side, "sender": sender_id, "text": text, "kind": kind,
                                "timestamp": stamp, "source": "wechat_db", "historical": True,
                                "_cursor": cursor}
+                        if session_id.endswith("@chatroom") and kind == "text":
+                            msg["directed_to_me"] = _explicit_mention(text, self.self_display_name)
                         rows.append((cursor, msg))
             except Exception as exc:
                 raise WeChatDBError("读取微信消息快照失败") from exc
