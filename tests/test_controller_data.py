@@ -23,6 +23,7 @@ class IndexedControllerTests(unittest.TestCase):
         self.native = patch('desk.capture_service.CaptureService')
         self.native.start()
         self.ctrl = Controller(self.root / 'data')
+        self.ctrl.store.config['source'] = 'ocr'  # This suite exercises the legacy collected/OCR catalog.
         archive = {
             'chatlab': {'version': '0.0.2'},
             'meta': {'name': 'Synthetic project group', 'platform': 'wechat', 'type': 'group',

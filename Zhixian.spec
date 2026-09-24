@@ -5,7 +5,7 @@ from pathlib import Path
 root = Path(SPECPATH)
 datas = [(str(root / 'ui'), 'ui'), (str(root / 'THIRD_PARTY_NOTICES.md'), '.')]
 binaries, hiddenimports = [], []
-for module in ('rapidocr_onnxruntime', 'windows_capture'):
+for module in ('rapidocr_onnxruntime', 'windows_capture', 'sqlcipher3', 'zstandard'):
     d, b, h = collect_all(module)
     datas += d
     binaries += b

@@ -4,3 +4,5 @@ numpy>=2,<3
 windows-capture==2.0.1
 pillow>=11,<13
 pyinstaller>=6.20,<7
+sqlcipher3==0.6.2
+zstandard==0.25.0

@@ -21,5 +21,7 @@ setuptools==84.0.0
 shapely==2.1.2
 shiboken6==6.11.2
 six==1.17.0
+sqlcipher3==0.6.2
 tqdm==4.70.1
 windows-capture==2.0.1
+zstandard==0.25.0

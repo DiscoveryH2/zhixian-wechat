@@ -20,6 +20,8 @@ from .store import Store, _atomic, _load
 from .auto_reply import AutoReplyGuard
 from .imports import ChatLabImporter
 from .datahub import DataHub
+from .wechat_db_source import WeChatDBSource
+from .wechat_sqlcipher import discover_cipher_source
 from .version import VERSION
 from .tasks import ModelTasks, HelperTasks
 
@@ -66,8 +68,8 @@ class Controller(QObject):
         self.media_cache = OrderedDict()
         self.media_inputs = OrderedDict()
         self.background_url = self._background_url()
-        self.status = {'capture': 'idle', 'analysis': 'idle', 'detail': '配置接口后，开始读取微信当前会话。',
-                       'last_error': self.store.error, 'source': 'ocr', 'connected': False}
+        self.status = {'capture': 'idle', 'analysis': 'idle', 'detail': '配置接口后，开始读取微信本机数据库。',
+                       'last_error': self.store.error, 'source': self.store.config['source'], 'connected': False}
         self.revision, self.job_serial = 0, 0
         self.inflight = None
         self.pending = None
@@ -150,7 +152,9 @@ class Controller(QObject):
         now = time.time()
         sent = self.auto_guard.snapshot().get('sent', [])
         enabled = self.auto_policy['enabled']
-        visible_allowed = any(item['session_id'] == self.live_id for item in self.auto_allowlist)
+        visible_allowed = (any(item.get('source') == 'wechat_db' for item in self.auto_allowlist)
+                           if self.store.config['source'] == 'wechat_db' else
+                           any(item['session_id'] == self.live_id for item in self.auto_allowlist))
         waiting_for_target = enabled and not self.auto_paused and self.status['capture'] == 'live' and not visible_allowed
         status = ('off' if not enabled else 'paused' if self.auto_paused else
                   'running' if self.status['capture'] == 'live' and visible_allowed else 'blocked')
@@ -213,15 +217,15 @@ class Controller(QObject):
             with self.catalog_lock:
                 meta = copy.deepcopy(self.catalog_items.get(sid))
             meta = meta or copy.deepcopy(self.sessions.get(sid))
-            if not meta or meta.get('source') not in ('ocr', 'weflow'):
+            if not meta or meta.get('source') not in ('ocr', 'weflow', 'wechat_db'):
                 raise ValueError('自动回复只能选择实时微信会话，不能选择导入归档。')
             if meta.get('source') == 'ocr' and (sid != self.live_id or self.status['capture'] != 'live'):
                 raise ValueError('OCR 自动回复只能选择当前微信正在显示的会话。')
-            if meta.get('source') == 'weflow':
-                talker = str(meta.get('talker') or '')
+            if meta.get('source') in ('weflow', 'wechat_db'):
+                talker = str(meta.get('talker') or meta.get('id') or '')
                 kind = 'group' if talker.endswith('@chatroom') else meta.get('type')
                 if kind not in ('private', 'group'):
-                    raise ValueError('WeFlow 未提供可靠的会话类型，已拒绝自动发送。')
+                    raise ValueError('数据库或 WeFlow 未提供可靠的会话类型，已拒绝自动发送。')
             else:
                 kind = raw.get('type')
                 if kind not in ('private', 'group'):
@@ -230,7 +234,7 @@ class Controller(QObject):
                              'type': kind, 'is_group': kind == 'group', 'source': meta['source']})
             seen.add(sid)
         if len({entry['source'] for entry in resolved}) > 1:
-            raise ValueError('自动回复一次只能使用 OCR 当前会话或 WeFlow 会话，不能混合两个实时来源。')
+            raise ValueError('自动回复一次只能使用一种实时消息来源，不能混合名单。')
         self._cancel_auto_work()
         self.auto_allowlist = resolved
         self.auto_policy = self._auto_policy_from(params)
@@ -258,6 +262,8 @@ class Controller(QObject):
         source = self.auto_allowlist[0].get('source')
         if source == 'weflow' and self.store.config['source'] != 'weflow':
             raise ValueError('请先在设置中启用已连接的 WeFlow 消息来源。')
+        if source == 'wechat_db' and self.store.config['source'] != 'wechat_db':
+            raise ValueError('请先在设置中启用本机微信数据库来源。')
         if source == 'ocr' and (self.auto_allowlist[0]['session_id'] != self.live_id or self.status['capture'] != 'live'):
             raise ValueError('请让已选的 OCR 会话保持在当前可见的微信窗口。')
         from core.client import resolve_decision, resolve_reply
@@ -267,10 +273,12 @@ class Controller(QObject):
         self.auto_policy['session_ids'] = [entry['session_id'] for entry in self.auto_allowlist]
         self.auto_policy['enabled'] = True
         self.auto_paused = False
-        self.auto_detail = '自动回复已启用；只处理启用之后的新入站文字，发送前还会核验微信窗口和输入框。'
+        self.auto_detail = ('自动回复已启用；只处理启用之后的新入站文字。数据库模式仍要求目标会话在微信窗口中可唯一核验。'
+                            if source == 'wechat_db' else
+                            '自动回复已启用；只处理启用之后的新入站文字，发送前还会核验微信窗口和输入框。')
         if self.status['capture'] not in ('live', 'searching'):
             self.capture.start(cfg)
-            self.status.update(capture='searching', detail='正在定位微信窗口…')
+            self.status.update(capture='searching', detail='正在连接微信本地数据库…' if source == 'wechat_db' else '正在定位微信窗口…')
         try:
             self._save_auto_state()
         except OSError:
@@ -413,12 +421,15 @@ class Controller(QObject):
             self._auto_record(sid, 'failed', '发送状态未能安全保存')
             return
         self.auto_send_busy = True
-        self.auto_detail = '正在对微信当前窗口与输入框做最终核验。'
+        self.auto_detail = '正在用数据库核验最新来信，并检查微信标题与输入框。' if trigger['event'].get('source') == 'wechat_db' else '正在对微信当前窗口与输入框做最终核验。'
         sender = trigger['message'].get('sender', '') if trigger['type'] == 'group' else ''
         try:
-            future = self.pool.submit(self.capture.send, reply, session['title'],
-                                      trigger['message'].get('text', ''), sender, prior,
-                                      trigger['event'].get('sidebar_signature', ''))
+            if trigger['event'].get('source') == 'wechat_db':
+                future = self.pool.submit(self.capture.send_db, reply, sid, trigger['message']['id'])
+            else:
+                future = self.pool.submit(self.capture.send, reply, session['title'],
+                                          trigger['message'].get('text', ''), sender, prior,
+                                          trigger['event'].get('sidebar_signature', ''))
             future.add_done_callback(lambda done: self._emit_auto_send_done(sid, trigger['epoch'], done))
         except Exception:
             self.auto_send_busy = False
@@ -444,8 +455,8 @@ class Controller(QObject):
         result = payload.get('result') if isinstance(payload, dict) else None
         status = result.get('status') if isinstance(result, dict) else None
         if status == 'sent':
-            self._auto_record(sid, 'sent', '当前微信会话已出现对应发出气泡')
-            self.auto_detail = '上一条回复已在微信当前会话确认；继续等待新消息。'
+            self._auto_record(sid, 'sent', '已在目标微信会话确认发出消息')
+            self.auto_detail = '上一条回复已在目标会话确认；继续等待新消息。'
         elif status == 'sent_unconfirmed':
             self.auto_paused = True
             self._auto_record(sid, 'failed', '已按下发送键，但未能确认送达；已暂停，请检查微信')
@@ -522,12 +533,13 @@ class Controller(QObject):
             raise ValueError('请先配置 Jev API Key。')
         sid = str(params.get('session_id') or '')[:256]
         chosen = next((item for item in self.auto_allowlist if item['session_id'] == sid), None)
-        if not chosen or chosen.get('source') not in ('ocr', 'weflow'):
+        if not chosen or chosen.get('source') not in ('ocr', 'weflow', 'wechat_db'):
             raise ValueError('历史补回只允许名单内的实时会话，导入归档不能发送。')
         session = self.sessions.get(sid)
-        if (not session or sid != self.live_id or self.status['capture'] != 'live' or
+        db_selected = chosen['source'] == 'wechat_db'
+        if (not session or (not db_selected and sid != self.live_id) or self.status['capture'] != 'live' or
                 session.get('source') != chosen['source'] or len(session.get('messages') or []) < 2):
-            raise ValueError('请先在微信打开目标会话，并读取至少两条可核对的上下文。')
+            raise ValueError('请先读取目标会话至少两条可核对的上下文。')
         if session['messages'][-1].get('side') != 'other':
             raise ValueError('你已是最后发言人；没有待补回的最新来信。')
         if session['messages'][-1].get('kind', 'text') != 'text':
@@ -574,7 +586,7 @@ class Controller(QObject):
             self.catchup = {'session_id': sid, 'status': 'failed', 'reason': '历史判断或草稿生成未完成。'}
             self.catchup_busy = False
             self._auto_record(sid, 'failed', '历史判断或草稿生成失败')
-        elif (not session or sid != self.live_id or self.status['capture'] != 'live' or
+        elif (not session or (session.get('source') != 'wechat_db' and sid != self.live_id) or self.status['capture'] != 'live' or
                 self.fingerprint(session) != fingerprint):
             self.catchup = {'session_id': sid, 'status': 'skipped', 'reason': '会话或最近消息已变化，旧判断未发送。'}
             self.catchup_busy = False
@@ -620,9 +632,12 @@ class Controller(QObject):
                             self._save_auto_state()
                             sender = target.get('sender', '') if typed['type'] == 'group' else ''
                             self.catchup = {'session_id': sid, 'status': 'sending',
-                                            'reason': '正在重新核验微信当前窗口与输入框。'}
-                            future = self.pool.submit(self.capture.send, reply, session['title'],
-                                                      target.get('text', ''), sender, previous)
+                                            'reason': '正在核验数据库最新来信、微信标题与输入框。'}
+                            if session.get('source') == 'wechat_db':
+                                future = self.pool.submit(self.capture.send_db, reply, sid, target['id'])
+                            else:
+                                future = self.pool.submit(self.capture.send, reply, session['title'],
+                                                          target.get('text', ''), sender, previous)
                             future.add_done_callback(lambda done: self._emit_catchup_sent(serial, sid, done))
                         except Exception:
                             self.catchup = {'session_id': sid, 'status': 'failed',
@@ -646,8 +661,8 @@ class Controller(QObject):
         status = result.get('status') if isinstance(result, dict) else None
         if status == 'sent':
             self.catchup = {'session_id': sid, 'status': 'sent',
-                            'reason': '已在当前微信窗口识别到对应的发出气泡。'}
-            self._auto_record(sid, 'sent', '一次性历史补回已出现发出气泡')
+                            'reason': '已确认目标会话发出的消息。'}
+            self._auto_record(sid, 'sent', '一次性历史补回已确认发出')
         elif status == 'sent_unconfirmed':
             self.catchup = {'session_id': sid, 'status': 'failed',
                             'reason': '已按下发送键，但未确认发出；请检查微信，系统不会重试。'}
@@ -726,17 +741,74 @@ class Controller(QObject):
         result = dict(item)
         result['is_group'] = item.get('type') == 'group' or str(item.get('talker') or '').endswith('@chatroom')
         source = item.get('source')
-        result['auto_reply_eligible'] = bool(source == 'weflow' or
+        result['auto_reply_eligible'] = bool(source in ('weflow', 'wechat_db') or
                                              (source == 'ocr' and item.get('id') == self.live_id and self.status['capture'] == 'live'))
-        result['auto_reply_type_known'] = source == 'weflow' and item.get('type') in ('private', 'group')
+        result['auto_reply_type_known'] = source in ('weflow', 'wechat_db') and item.get('type') in ('private', 'group')
         return result
+
+    @staticmethod
+    def _wechat_db_reader():
+        account, storage, connections = discover_cipher_source()
+        return WeChatDBSource(storage, self_wxid=account.wxid, connect_factory=connections)
+
+    def _wechat_db_catalog_page(self, query, cursor, limit):
+        state = self._read_catalog_cursor(cursor, 'wechat_db', query) if cursor else {'offset': 0}
+        offset = int(state['offset'])
+        reader = self._wechat_db_reader()
+        # Read the first page immediately. Name search is a bounded walk over
+        # SessionTable pages until the adapter can use a contact-name index.
+        if not query:
+            rows = reader.sessions(limit + 1, offset)
+            selected = rows[:limit]
+            next_offset = offset + len(selected)
+            more = len(rows) > limit
+        else:
+            selected, next_offset, more = [], offset, False
+            scanned = 0
+            needle = query.casefold()
+            while len(selected) <= limit and scanned < 20000:
+                batch = reader.sessions(200, next_offset)
+                if not batch:
+                    break
+                for row in batch:
+                    next_offset += 1
+                    if needle in str(row.get('name') or '').casefold() or needle in str(row.get('id') or '').casefold():
+                        selected.append(row)
+                        if len(selected) > limit:
+                            more = True
+                            break
+                scanned += len(batch)
+                if more or len(batch) < 200:
+                    break
+            if more:
+                selected = selected[:limit]
+                # The overflow row must be reconsidered on the next page.
+                next_offset -= 1
+        items = [{'id': row['id'], 'title': row.get('name') or row['id'], 'type': row.get('type'),
+                  'source': 'wechat_db', 'talker': row['id'], 'preview': row.get('preview') or '',
+                  'updated': row.get('sort_timestamp') or row.get('timestamp') or 0,
+                  'last_message_kind': {3: 'image', 34: 'voice'}.get(row.get('last_msg_type'))}
+                 for row in selected]
+        next_cursor = self._catalog_cursor({'source': 'wechat_db', 'query': query, 'offset': next_offset}) if more else None
+        return {'items': items, 'next_cursor': next_cursor, 'has_more': bool(next_cursor),
+                'source': 'wechat_db', 'scope': 'all_available', 'available': True,
+                'warning': None, 'total_loaded': len(items)}
 
     def _list_sessions_task(self, config, query, cursor, limit, source, collected_snapshot=None):
         query = str(query or '').strip()[:100]
         limit = min(50, max(1, int(limit or 20)))
-        source = source if source in ('all', 'weflow', 'import', 'collected') else 'all'
+        source = source if source in ('all', 'weflow', 'wechat_db', 'import', 'collected') else 'all'
+        if source == 'all' and config.get('source') == 'wechat_db':
+            source = 'wechat_db'
         if source == 'import':
             result = self.imports.list_sessions(query, cursor, limit)
+        elif source == 'wechat_db':
+            try:
+                result = self._wechat_db_catalog_page(query, cursor, limit)
+            except Exception:
+                result = {'items': [], 'next_cursor': None, 'has_more': False, 'source': 'wechat_db',
+                          'scope': 'unavailable', 'available': False,
+                          'warning': '无法只读访问本机微信数据库；请检查 CipherTalk 已配置账号和微信登录状态。'}
         elif source == 'collected':
             state = self._read_catalog_cursor(cursor, source, query) if cursor else {'offset': 0}
             rows = [self._catalog_item({'id': item['id'], 'title': item['title'], 'source': item.get('source', 'ocr'),
@@ -801,6 +873,19 @@ class Controller(QObject):
     def _session_page_task(self, config, sid, cursor=None, limit=50):
         if sid.startswith('import:'):
             return self.imports.messages(sid, cursor, limit)
+        with self.catalog_lock:
+            source = (self.catalog_items.get(sid) or {}).get('source')
+        if source == 'wechat_db' or (config.get('source') == 'wechat_db' and not sid.startswith(('ocr:', 'weflow:'))):
+            reader = self._wechat_db_reader()
+            before = self._read_catalog_cursor(cursor, 'wechat_db_messages', sid)['before'] if cursor else None
+            rows = reader.messages(sid, limit=min(100, int(limit)) + 1, before=before)
+            selected = rows[:limit]
+            next_cursor = (self._catalog_cursor({'source': 'wechat_db_messages', 'query': sid,
+                           'before': selected[-1]['_cursor']}) if len(rows) > limit and selected else None)
+            items = [{k: v for k, v in row.items() if k != '_cursor'} for row in reversed(selected)]
+            return {'items': items, 'next_cursor': next_cursor, 'has_more': bool(next_cursor),
+                    'source': 'wechat_db', 'available': True, 'scope': 'wechat_db_history',
+                    'order': 'chronological', 'direction': 'older'}
         return self.hub.messages(config, sid, cursor, limit)
 
     def _session_first_page(self, config, sid):
@@ -995,9 +1080,9 @@ class Controller(QObject):
                          'preview': s.get('messages', [{}])[-1].get('text', '')[:100] if s.get('messages') else '',
                          'updated': s.get('updated', 0), 'source': s.get('source', 'ocr'),
                          'type': s.get('type', 'unknown'),
-                         'auto_reply_eligible': s.get('source') == 'weflow' or
+                         'auto_reply_eligible': s.get('source') in ('weflow', 'wechat_db') or
                                                 (s.get('source') == 'ocr' and s['id'] == self.live_id and self.status['capture'] == 'live'),
-                         'auto_reply_type_known': s.get('source') == 'weflow' and s.get('type') in ('private', 'group')}
+                         'auto_reply_type_known': s.get('source') in ('weflow', 'wechat_db') and s.get('type') in ('private', 'group')}
                          for s in sorted(self.sessions.values(), key=lambda s: s.get('updated', 0), reverse=True)]
         return {'config': self.store.public_config(), 'status': dict(self.status), 'sessions': session_list,
                 'current_session': current, 'analysis': copy.deepcopy(self.results.get(self.current_id)),
@@ -1524,7 +1609,7 @@ class Controller(QObject):
                     known.add(message['id'])
                     added.append(message)
                 session['messages'] = (session['messages'] + added)[-500:]
-                if data.get('source') == 'weflow':
+                if data.get('source') in ('weflow', 'wechat_db'):
                     session['messages'].sort(key=lambda m: m.get('timestamp') or 0)
                 session['updated'] = time.time()
                 # Imported archives already live in their own local index. Avoid

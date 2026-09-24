@@ -52,7 +52,7 @@
   const pending = new Map();
   let bridge = null, counter = 0, page = 'workspace', compact = window.innerWidth <= 640, online = false, search = '', currentState;
   let renderQueued = false, experience = null, lastWorkspaceKey = null, lastAutoReplyKey = null;
-  const blank = () => ({ config: { base_url: '', model_name: '', has_api_key: false, reply_model: '', reply_base_url: '', has_reply_api_key: false, relationship: '朋友', style: '自然简洁', auto_analyze: true, context_limit: 30, save_history: false, always_on_top: false, source: 'ocr', weflow_url: 'http://127.0.0.1:5031', weflow_has_token: false, debounce_ms: 1800 }, status: { capture: 'idle', analysis: 'idle', detail: '等待开始读取微信', last_error: '', source: 'ocr', connected: false }, auto_reply: { enabled: false, paused: false, status: 'off', detail: '', allowlist: [], group_mode: 'mention_only', debounce_seconds: 4, cooldown_seconds: 45, hourly_limit: 8, daily_limit: 40, sent_hour: 0, sent_day: 0, recent: [] }, sessions: [], current_session: null, analysis: null, notes: [], contacts: [], version: '1.4.1' });
+  const blank = () => ({ config: { base_url: '', model_name: '', has_api_key: false, reply_model: '', reply_base_url: '', has_reply_api_key: false, relationship: '朋友', style: '自然简洁', auto_analyze: true, context_limit: 30, save_history: false, always_on_top: false, source: 'ocr', weflow_url: 'http://127.0.0.1:5031', weflow_has_token: false, debounce_ms: 1800 }, status: { capture: 'idle', analysis: 'idle', detail: '等待开始读取微信', last_error: '', source: 'ocr', connected: false }, auto_reply: { enabled: false, paused: false, status: 'off', detail: '', allowlist: [], group_mode: 'mention_only', debounce_seconds: 4, cooldown_seconds: 45, hourly_limit: 8, daily_limit: 40, sent_hour: 0, sent_day: 0, recent: [] }, sessions: [], current_session: null, analysis: null, notes: [], contacts: [], version: '1.5.0' });
   currentState = blank();
   const configured = () => currentState.config.has_api_key && currentState.config.base_url && currentState.config.model_name;
   const live = () => ['live', 'searching'].includes(currentState.status.capture);
@@ -140,7 +140,7 @@
     chip.className = `status-chip ${autoReplyLabel ? `auto-reply-chip ${autoReply.enabled && !autoReply.paused ? 'running' : autoReply.status === 'emergency' ? 'error' : ''}` : status.analysis === 'running' ? 'running' : status.capture === 'live' ? 'live' : status.capture === 'error' ? 'error' : ''}`;
     $('#footer-status').textContent = status.detail || '本地工作台已就绪';
     $('#footer-meta').textContent = currentState.config.model_name ? `${currentState.config.model_name} · ${sourceLabel(currentState.config.source)}` : 'Jev · 语境与判断';
-    $('#version').textContent = String(currentState.version || '1.4.1');
+    $('#version').textContent = String(currentState.version || '1.5.0');
     $('#demo-label').hidden = !demo;
     $('#mini-expand').hidden = !compact;
     renderNavigation();
@@ -172,7 +172,7 @@
     const nextJudgment = $('.judgment-details'); if (nextJudgment) nextJudgment.open = judgmentOpen;
     const nextAssist = $('.assistant-panel'); if (nextAssist) nextAssist.scrollTop = assistScroll;
   }
-  function sourceLabel(source) { return source === 'weflow' ? 'WeFlow 本地接口' : source === 'manual' ? '手动提供的对话' : source === 'import' ? '已导入的聊天记录' : source === 'demo' ? '合成演示数据' : '微信窗口 · 本地 OCR'; }
+  function sourceLabel(source) { return source === 'wechat_db' ? '本机微信数据库 · CipherTalk' : source === 'weflow' ? 'WeFlow 本地接口' : source === 'manual' ? '手动提供的对话' : source === 'import' ? '已导入的聊天记录' : source === 'demo' ? '合成演示数据' : '微信窗口 · 本地 OCR'; }
   function workspace() {
     const s = currentState, current = s.current_session, busy = s.status.analysis === 'running';
     const root = el('section', 'page workspace');
@@ -354,7 +354,7 @@
     const generation = el('section', 'advanced-section'); generation.append(el('h3', '', '候选回复生成（可选）'), el('p', 'field-hint', 'OpenRouter 接入可复用同一密钥，默认用 deepseek/deepseek-v4.1-flash 起草回复。TypeSafe 直连或自定义判断服务需另配生成模型，才能提供候选回复。'));
     generation.append(field('生成模型名称', 'reply_model', c.reply_model, { optional: true, placeholder: '留空：OpenRouter 使用默认回复模型' }), field('生成模型 Base URL', 'reply_base_url', c.reply_base_url, { optional: true, placeholder: '留空：按服务自动匹配' }), field('生成模型 API Key', 'reply_api_key', '', { type: 'password', optional: true, placeholder: c.has_reply_api_key ? '已保存，留空保留' : '留空：仅同服务复用主密钥' }));
     const source = el('section', 'advanced-section'); source.append(el('h3', '', '消息读取'));
-    source.append(field('读取来源', 'source', c.source === 'auto' ? 'ocr' : c.source, { options: [['ocr', '微信可见窗口（本地 OCR）'], ['weflow', '已有 WeFlow 本地服务']] }), el('p', 'field-hint', '默认读取微信可见窗口，无需数据库密钥。切换会话后会重新建立上下文。'));
+    source.append(field('读取来源', 'source', c.source === 'auto' ? 'ocr' : c.source, { options: [['ocr', '微信可见窗口（本地 OCR）'], ['wechat_db', '本机微信数据库（CipherTalk 已配置账号）'], ['weflow', '已有 WeFlow 本地服务']] }), el('p', 'field-hint', '数据库来源直接读取本机微信记录，无需截图；复用 CipherTalk 已配置账号，数据库密钥不会进入知弦设置。数据库读取接入状态以运行状态提示为准。切换会话后会重新建立上下文。'));
     source.append(field('WeFlow 地址', 'weflow_url', c.weflow_url, { optional: true, placeholder: 'http://127.0.0.1:5031' }), field('WeFlow 访问令牌', 'weflow_token', '', { type: 'password', optional: true, placeholder: c.weflow_has_token ? '已保存，留空保留' : '仅当你的服务需要验证时填写' }));
     source.append(button('检查读取来源', 'refresh', async () => { const result = await rpc('refresh_sources'); const sources = Array.isArray(result) ? result : result?.sources; if (sources?.length) toast(sources.map(s => typeof s === 'string' ? s : s.title || s.name || s.source || '已发现窗口').join('；')); else toast(typeof result?.message === 'string' ? result.message : '已刷新来源。请确认微信窗口已打开。'); }, 'small', !available()));
     const behavior = el('section', 'advanced-section'); behavior.append(el('h3', '', '分析与表达'));

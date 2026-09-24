@@ -146,7 +146,7 @@ class Store:
             config['font_scale'] = font_scale
             if config['stt_backend'] not in ('auto', 'local', 'cloud'):
                 raise ValueError('语音识别来源配置无效。')
-            if config['source'] not in ('ocr', 'weflow', 'auto'):
+            if config['source'] not in ('ocr', 'weflow', 'wechat_db', 'auto'):
                 raise ValueError('不支持的消息来源。')
             for key in SECRETS:
                 if changes.get('clear_' + key):

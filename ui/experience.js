@@ -108,7 +108,7 @@ window.ZhixianExperience = Object.freeze({
       const input = el('input', 'input'); input.id = 'session-search'; input.type = 'search'; input.placeholder = '搜索好友、群聊或会话名称'; input.autocomplete = 'off'; input.setAttribute('aria-label', input.placeholder);
       input.addEventListener('input', () => { clearTimeout(searchTimer); catalog.query = input.value; catalog.serial++; catalog.busy = false; searchTimer = setTimeout(() => fetchCatalog(true), 220); });
       const filters = el('div', 'catalog-filters');
-      for (const [value, label] of [['all', '全部可用'], ['weflow', 'WeFlow'], ['import', '已导入'], ['collected', '已采集']]) {
+      for (const [value, label] of [['all', '全部可用'], ['wechat_db', '本机微信数据库 · CipherTalk'], ['weflow', 'WeFlow'], ['import', '已导入'], ['collected', '已采集']]) {
         const filter = el('button', `catalog-filter${value === 'all' ? ' active' : ''}`, label); filter.type = 'button'; filter.dataset.filter = value;
         filter.addEventListener('click', () => { catalog.filter = value; catalog.serial++; catalog.busy = false; filters.querySelectorAll('button').forEach(b => b.classList.toggle('active', b === filter)); fetchCatalog(true); }); filters.append(filter);
       }
@@ -166,8 +166,8 @@ window.ZhixianExperience = Object.freeze({
       list.replaceChildren();
       const source = $('.catalog-source', dialog); source.replaceChildren();
       if (catalog.error) source.append(notice(catalog.error, 'error'));
-      else if (!catalog.available && !catalog.busy) source.append(notice(catalog.detail || '当前仅覆盖已读取的可见聊天。连接支持目录的 WeFlow，或导入 CipherTalk / ChatLab 导出的文件或目录；此页面不会自动读取微信数据库。', 'info'));
-      else { if (catalog.detail && !catalog.busy) source.append(notice(catalog.detail, 'info')); source.append(append(el('div', 'catalog-meta'), el('span', '', catalog.source === 'demo' ? '合成演示会话' : catalog.source === 'weflow' ? 'WeFlow 会话目录' : '当前可用会话'), el('span', '', catalog.total === null ? `已加载 ${catalog.items.length} 个` : `${catalog.total} 个会话`))); }
+      else if (!catalog.available && !catalog.busy) source.append(notice(catalog.detail || '当前没有已连接的会话目录。选择本机微信数据库来源后，此列表只显示数据适配器已读取到的会话；也可连接 WeFlow 或导入记录。', 'info'));
+      else { if (catalog.detail && !catalog.busy) source.append(notice(catalog.detail, 'info')); source.append(append(el('div', 'catalog-meta'), el('span', '', catalog.source === 'demo' ? '合成演示会话' : catalog.source === 'wechat_db' ? 'CipherTalk 本机微信数据库会话' : catalog.source === 'weflow' ? 'WeFlow 会话目录' : '当前可用会话'), el('span', '', catalog.total === null ? `已加载 ${catalog.items.length} 个` : `${catalog.total} 个会话`))); }
       if (catalog.busy && !catalog.items.length) list.append(append(el('div', 'catalog-loading'), el('div', 'skeleton wide'), el('div', 'skeleton medium'), el('div', 'skeleton wide')));
       for (const item of catalog.items) {
         if (catalog.multi && !item.auto_reply_eligible) continue;
@@ -175,7 +175,8 @@ window.ZhixianExperience = Object.freeze({
         const chosen = catalog.selected.has(String(item.id));
         const row = el('button', `catalog-row${chosen || item.id === getState().current_session?.id ? ' selected' : ''}${item.preview_status === 'pending' ? ' preview-pending' : ''}${catalog.multi ? ' catalog-multi-row' : ''}`); row.type = 'button'; row.dataset.sessionId = String(item.id); if (catalog.multi) row.setAttribute('aria-pressed', String(chosen));
         const name = displayName(item);
-        append(row, append(el('span', `catalog-avatar${group ? ' group-avatar' : ''}`), group ? icon('people', 19) : el('span', '', name.slice(0, 1))), append(el('span', 'catalog-copy'), append(el('span', 'catalog-title'), el('span', '', name), group ? tag('群聊') : null), el('span', 'catalog-preview', catalog.multi ? '微信实时会话 · 允许自动回复' : previewText(item))), append(el('span', 'catalog-trailing'), el('time', '', formatTime(item.updated || item.timestamp)), catalog.multi ? el('span', `catalog-choice${chosen ? ' chosen' : ''}`, chosen ? '已选择' : '选择') : item.id === getState().current_session?.id ? icon('check', 14) : icon('arrow', 14)));
+        const sourceHint = item.source === 'wechat_db' ? 'CipherTalk 数据库会话' : item.source === 'weflow' ? 'WeFlow 会话' : item.source === 'ocr' ? '微信可见窗口会话' : '本地会话';
+        append(row, append(el('span', `catalog-avatar${group ? ' group-avatar' : ''}`), group ? icon('people', 19) : el('span', '', name.slice(0, 1))), append(el('span', 'catalog-copy'), append(el('span', 'catalog-title'), el('span', '', name), group ? tag('群聊') : null), el('span', 'catalog-preview', catalog.multi ? `${sourceHint} · 允许回复范围；发送通道另行核验` : previewText(item))), append(el('span', 'catalog-trailing'), el('time', '', formatTime(item.updated || item.timestamp)), catalog.multi ? el('span', `catalog-choice${chosen ? ' chosen' : ''}`, chosen ? '已选择' : '选择') : item.id === getState().current_session?.id ? icon('check', 14) : icon('arrow', 14)));
         row.addEventListener('click', async () => {
           row.disabled = true; row.classList.add('selecting');
           try { if (catalog.multi) { if (catalog.selected.has(String(item.id))) catalog.selected.delete(String(item.id)); else { if (item.source === 'ocr' || [...catalog.selected.values()].some(entry => entry.source === 'ocr')) catalog.selected.clear(); catalog.selected.set(String(item.id), { session_id: String(item.id), title: name, is_group: group, type: item.auto_reply_type_known ? (group ? 'group' : 'private') : '', source: item.source, auto_reply_type_known: Boolean(item.auto_reply_type_known) }); } paintCatalog(); } else { if (catalog.onSelect) await catalog.onSelect(item); else { await rpc('select_session', { session_id: item.id }); await sync(); go('workspace'); } dialog.close(); } }
@@ -247,7 +248,7 @@ window.ZhixianExperience = Object.freeze({
       else if (a.enabled && a.paused) statusActions.append(button('恢复运行', 'play', () => confirmAutoReplyStart(), 'small primary', !available()), button('紧急停止', 'close', () => emergencyStop(), 'small danger', !available()));
       else statusActions.append(button('启动自动回复', 'play', () => confirmAutoReplyStart(), 'small primary', !available() || !a.allowlist?.length));
       liveCard.append(statusIcon, statusCopy, statusActions); root.append(liveCard);
-      root.append(notice('这项功能会通过微信真实发送消息。每条自动发送回复末尾都会附固定署名“（以上内容为知弦生成）”。当前 PC 自动发送只面向微信当前可见且可核验的聊天；导入的历史记录不能发送，也没有已验证的后台 WeFlow 发送 API。群聊默认仅回复明确 @ 我。OCR 没有可靠的 @ 标记，因此默认模式不会对 OCR 群聊自动发送；如需评估所有新消息，请选择对应模式，由 Jev 判断是否需要回复。', 'warn'));
+      root.append(notice(`这项功能会通过已接通的微信发送通道发送消息。每条自动发送回复末尾都会附固定署名“（以上内容为知弦生成）”。当前 PC 发送能力仍按会话核验与可见状态限制；数据库读取通道与发送通道相互独立，CipherTalk 数据库历史或实时来源本身不代表已支持无窗口后台发送，该发送端仍在开发中。群聊默认仅回复明确 @ 我。OCR 没有可靠的 @ 标记，因此默认模式不会对 OCR 群聊自动发送；如需评估所有新消息，请选择对应模式，由 Jev 判断是否需要回复。`, 'warn'));
 
       const currentSession = getState().current_session, permittedSessions = a.allowlist || [], visibleId = currentSession?.id;
       if (!permittedSessions.some(item => item.session_id === catchupSessionId)) catchupSessionId = permittedSessions.find(item => item.session_id === visibleId)?.session_id || permittedSessions[0]?.session_id || '';
@@ -261,19 +262,22 @@ window.ZhixianExperience = Object.freeze({
       for (const item of permittedSessions) catchupSelect.append(new Option(`${item.title || item.session_id}${item.is_group ? ' · 群聊' : ''}`, item.session_id));
       catchupSelect.value = catchupSessionId; catchupSelect.disabled = !permittedSessions.length || catchupBusy;
       catchupSelect.addEventListener('change', () => { catchupSessionId = catchupSelect.value; render(true); });
-      const chatMatches = Boolean(selectedCatchup && selectedCatchup.session_id === visibleId && getState().current_session?.active);
+      const dbSelected = selectedCatchup?.source === 'wechat_db';
+      const chatMatches = Boolean(selectedCatchup && selectedCatchup.session_id === visibleId &&
+        (dbSelected ? getState().status?.capture === 'live' : getState().current_session?.active));
       const configuredSource = currentSession?.source || getState().status?.source || getState().config?.source;
-      const sourceLabel = ({ ocr: 'OCR · 微信可见窗口', auto: 'OCR · 微信可见窗口', weflow: 'WeFlow · 本地接口', demo: '合成演示', manual: '手动上下文', import: '导入记录' })[configuredSource] || '来源未知';
+      const dbModeLabel = getState().status?.capture === 'live' ? 'CipherTalk DB · 实时监测' : 'CipherTalk DB · 历史读取';
+      const sourceLabel = ({ ocr: 'OCR · 微信可见窗口', auto: 'OCR · 微信可见窗口', wechat_db: dbModeLabel, weflow: 'WeFlow · 本地接口', demo: '合成演示', manual: '手动上下文', import: '导入记录' })[configuredSource] || '来源未知';
       const currentIsGroup = Boolean(currentSession?.is_group || currentSession?.type === 'group' || (chatMatches && selectedCatchup?.is_group));
-      const singleSession = append(el('div', 'auto-reply-current-session'), append(el('span', 'auto-reply-current-session-label'), '当前微信会话'), append(el('strong', '', currentSession?.title || '当前没有可见会话'), append(el('span', 'auto-reply-session-tag', currentIsGroup ? '群聊' : currentSession ? '单聊' : '—'), el('span', 'auto-reply-session-tag', sourceLabel))), el('span', 'auto-reply-session-risk', currentIsGroup ? (a.group_mode === 'all' ? '群聊规则：评估所有新消息；单次回复若未明确 @ 我，Jev 需要更高置信度。' : currentSession?.source === 'ocr' ? '群聊风险：OCR 无法可靠识别 @ 我，默认规则下本次会安全跳过。' : '群聊规则：仅有明确 @ 我证据时才会回复。') : (chatMatches ? '单次操作只检查并处理这一条会话中的最新未解决消息，最多发送一条。' : '所选允许名单会话与微信当前显示会话不一致；请先切换微信会话。')));
+      const singleSession = append(el('div', 'auto-reply-current-session'), append(el('span', 'auto-reply-current-session-label'), dbSelected ? '当前选定会话' : '当前微信会话'), append(el('strong', '', currentSession?.title || '当前没有可见会话'), append(el('span', 'auto-reply-session-tag', currentIsGroup ? '群聊' : currentSession ? '单聊' : '—'), el('span', 'auto-reply-session-tag', sourceLabel))), el('span', 'auto-reply-session-risk', dbSelected ? '依据数据库最新来信判断；发送前要求微信窗口显示这个会话，并只识别标题与输入框，若同名或目标不符则拒绝发送。' : currentIsGroup ? (a.group_mode === 'all' ? '群聊规则：评估所有新消息；单次回复若未明确 @ 我，Jev 需要更高置信度。' : currentSession?.source === 'ocr' ? '群聊风险：OCR 无法可靠识别 @ 我，默认规则下本次会安全跳过。' : '群聊规则：仅有明确 @ 我证据时才会回复。') : (chatMatches ? '单次操作只检查并处理这一条会话中的最新未解决消息，最多发送一条。' : '所选允许名单会话与微信当前显示会话不一致；请先切换微信会话。')));
       const catchupButton = button(catchupBusy ? '正在启动…' : '当前会话单次回复', 'spark', () => selectedCatchup && confirmCatchup(selectedCatchup), 'primary auto-reply-single-action', !available() || !selectedCatchup || !chatMatches || catchupBusy || ['judging', 'sending'].includes(catchup?.status));
-      catchupCard.append(catchupHead, singleSession, catchupSelectLabel, catchupSelect, el('p', 'field-hint auto-reply-catchup-hint', '检查当前可见聊天中最新一轮尚未解决的入站消息；经确认后最多发送一条，判断无需回复或未通过核验时会显示跳过原因。'), catchupButton, el('p', 'auto-reply-catchup-state', catchupStatusText(catchup)));
+      catchupCard.append(catchupHead, singleSession, catchupSelectLabel, catchupSelect, el('p', 'field-hint auto-reply-catchup-hint', dbSelected ? '从数据库判断选定会话的最新待回复消息；微信窗口必须显示同名且唯一的会话。判断无需回复或核验失败时不会发送。' : '检查当前可见聊天中最新一轮尚未解决的入站消息；经确认后最多发送一条，判断无需回复或未通过核验时会显示跳过原因。'), catchupButton, el('p', 'auto-reply-catchup-state', catchupStatusText(catchup)));
       if (catchup?.session_id && catchup.session_id !== catchupSessionId) catchupCard.querySelector('.auto-reply-catchup-state').textContent = `${catchupStatusText(catchup)} · ${permittedSessions.find(item => item.session_id === catchup.session_id)?.title || '其他会话'}`;
 
       const settings = el('section', 'panel auto-reply-settings');
       settings.append(append(el('div', 'auto-reply-section-head'), append(el('div'), el('div', 'eyebrow', '范围与节奏'), el('h2', '', '你决定知弦可以回复谁')),
         button(`管理名单 · ${a.allowlist?.length || 0}`, 'people', () => openCatalog(async selected => { const typed = await confirmAutoReplyTypes(selected); if (!typed) return; await rpc('configure_auto_reply', { allowlist: typed, ...autoReplyPolicy() }); await sync(); toast('自动回复名单已更新'); }, { multi: true, selected: a.allowlist || [] }), 'small subtle', !available())));
-      settings.append(el('p', 'field-hint auto-reply-explainer', '只从全局会话目录中选择已核验的实时会话。OCR 会话需保持在微信当前可见窗口；WeFlow 会话发送前也会再核验微信前台状态。'));
+      settings.append(el('p', 'field-hint auto-reply-explainer', '会话名单只定义分析范围。CipherTalk 来源会标记为数据库历史读取或实时监测；读取记录并不授予发送能力，数据库来源的无窗口发送端仍在开发。OCR 会话需保持在微信当前可见窗口；其他会话也要经过已接通的发送端核验。'));
       const allowlist = el('div', 'auto-reply-allowlist');
       if (a.allowlist?.length) for (const item of a.allowlist) allowlist.append(append(el('div', 'auto-reply-person'), append(el('span', `auto-reply-avatar${item.is_group ? ' group' : ''}`), item.is_group ? icon('people', 15) : el('span', '', (item.title || '弦').slice(0, 1))), append(el('span', 'auto-reply-person-copy'), el('strong', '', item.title || item.session_id), el('span', '', item.is_group ? (a.group_mode === 'all' ? '群聊 · 评估所有新消息，由 Jev 判断是否回复' : '群聊 · 仅回复明确 @ 我') : '联系人 · 回复新消息')), button('移除', 'close', async () => { await rpc('configure_auto_reply', { allowlist: a.allowlist.filter(entry => entry.session_id !== item.session_id), ...autoReplyPolicy() }); await sync(); }, 'small ghost')));
       else allowlist.append(el('div', 'auto-reply-empty', '名单为空。知弦不会向任何会话发送消息。'));

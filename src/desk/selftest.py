@@ -15,7 +15,16 @@ def run_self_test(report_file):
         from app.ocr import read_title
         from desk.tasks import ModelTasks
         import windows_capture
+        import sqlcipher3
+        import zstandard
         import PySide6.QtWebEngineWidgets
+        with sqlcipher3.connect(':memory:') as cipher_check:
+            if not cipher_check.execute('PRAGMA cipher_version').fetchone():
+                raise RuntimeError('Bundled SQLCipher driver is unavailable')
+        report['checks'].append('sqlcipher3_import')
+        if zstandard.ZstdDecompressor().decompress(zstandard.ZstdCompressor().compress(b'synthetic')) != b'synthetic':
+            raise RuntimeError('Bundled Zstandard decoder is unavailable')
+        report['checks'].append('zstandard_import')
         image = Image.new('RGB', (440, 80), '#f5f5f5')
         draw = ImageDraw.Draw(image)
         assets = Path(sys._MEIPASS) if getattr(sys, 'frozen', False) else Path(__file__).resolve().parents[2]

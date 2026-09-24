@@ -76,7 +76,7 @@ class ScreenHistory:
 
 
 class CaptureService:
-    def __init__(self, callback, audit_path=None):
+    def __init__(self, callback, audit_path=None, db_source_factory=None):
         self.callback = callback
         self.audit_path = Path(audit_path) if audit_path else None
         self._audit_targets = {}
@@ -106,6 +106,11 @@ class CaptureService:
         self._control_epoch = 0
         self._last_wechat_foreground_at = 0.0
         self._sidebar_signatures = {}
+        # Optional factory keeps the database polling path testable with a fake
+        # source. Production discovery is lazy and never loads native capture.
+        self._db_source_factory = db_source_factory
+        self._db_seen = set()
+        self._db_seen_order = deque()
 
     def _send_audit(self, stage, task, status=""):
         """Record sender provenance without retaining titles, drafts or keys."""
@@ -154,7 +159,8 @@ class CaptureService:
             if not self._wanted.is_set():
                 self._sidebar_signatures.clear()
             next_config = dict(config or {})
-            next_config["source"] = "weflow" if next_config.get("source") == "weflow" else "ocr"
+            requested_source = str(next_config.get("source") or "ocr")
+            next_config["source"] = requested_source if requested_source in ("weflow", "wechat_db") else "ocr"
             self._config = next_config
             self._config_revision += 1
             self._control_epoch += 1
@@ -203,6 +209,8 @@ class CaptureService:
         return {"success": True}
 
     def fill(self, text, session_title):
+        if self._config.get("source") == "wechat_db":
+            raise RuntimeError("数据库读取模式暂不支持基于截图核验的填入操作")
         if not str(text).strip() or not str(session_title).strip():
             raise RuntimeError("请选择有内容的候选回复和明确会话")
         task = {"text": str(text), "title": str(session_title), "done": threading.Event(),
@@ -224,6 +232,8 @@ class CaptureService:
         This method never switches chats. If the target conversation is not
         already visible in WeChat, the worker refuses the send.
         """
+        if self._config.get("source") == "wechat_db":
+            raise RuntimeError("数据库读取模式尚无可靠的目标会话发送适配器，已拒绝发送")
         if not str(text).strip() or not str(session_title).strip() or not str(expected_incoming).strip():
             raise RuntimeError("自动发送需要明确的新消息与目标会话")
         task = {"mode": "send", "text": str(text), "title": str(session_title),
@@ -237,6 +247,35 @@ class CaptureService:
         if not task["done"].wait(30):
             task["cancelled"].set()
             raise RuntimeError("自动发送核验超时；状态可能不确定，请检查微信")
+        if task.get("error"):
+            raise RuntimeError(task["error"])
+        return task.get("result", {"success": False, "status": "unconfirmed"})
+
+    def send_db(self, text, session_id, message_id):
+        """Send from one DB event; only header/composer pixels may be inspected.
+
+        The chat record and newest inbound identity are read from SQLCipher.
+        This intentionally cannot navigate to another conversation by name.
+        """
+        if self._config.get("source") != "wechat_db":
+            raise RuntimeError("请先切换至微信数据库消息来源")
+        if not self._wanted.is_set() or self._stop.is_set():
+            raise RuntimeError("数据库监听已暂停，不能自动发送")
+        if not all(isinstance(value, str) and value.strip() for value in (text, session_id, message_id)):
+            raise RuntimeError("数据库发送需要明确会话与入站消息 ID")
+        disclosure = "（以上内容为知弦生成）"
+        outgoing = text.replace(disclosure, "").strip() + disclosure
+        if len(outgoing) > 180:
+            raise RuntimeError("数据库回复超过 180 字，已拒绝发送")
+        task = {"mode": "send_db", "text": outgoing, "session_id": session_id,
+                "message_id": message_id, "title": session_id,
+                "done": threading.Event(), "cancelled": threading.Event(), "epoch": self._control_epoch}
+        self._requests.put(task)
+        self._ensure_thread()
+        self._wake.set()
+        if not task["done"].wait(60):
+            task["cancelled"].set()
+            raise RuntimeError("数据库发送核验超时；结果可能不确定，请检查微信")
         if task.get("error"):
             raise RuntimeError(task["error"])
         return task.get("result", {"success": False, "status": "unconfirmed"})
@@ -263,7 +302,206 @@ class CaptureService:
         except Exception:
             available, detail = False, "未发现本机 WeFlow API（可选）"
         result.append({"id": "weflow", "name": "WeFlow 本地 API", "available": available, "detail": detail})
+        try:
+            from desk.wechat_sqlcipher import discover_cipher_source
+            discover_cipher_source()
+            db_available = True
+            db_detail = "已发现本机 CipherTalk 微信数据库配置；启动时只读验证"
+        except Exception:
+            db_available = False
+            db_detail = "未发现可用的本机 CipherTalk 数据库配置"
+        result.append({"id": "wechat_db", "name": "微信本地数据库", "available": db_available,
+                       "detail": db_detail})
         return result
+
+    def _new_wechat_db_source(self):
+        if self._db_source_factory is not None:
+            return self._db_source_factory()
+        from desk.wechat_sqlcipher import discover_cipher_source
+        from desk.wechat_db_source import WeChatDBSource
+        account, db_storage, connect_factory = discover_cipher_source()
+        return WeChatDBSource(db_storage, self_wxid=account.wxid, connect_factory=connect_factory)
+
+    @staticmethod
+    def _db_head_marker(head):
+        return (int(head.get("sort_timestamp") or 0), int(head.get("timestamp") or 0),
+                int(head.get("last_msg_local_id") or 0), int(head.get("last_msg_type") or 0))
+
+    @staticmethod
+    def _db_cursor(message):
+        cursor = message.get("_cursor")
+        if isinstance(cursor, (tuple, list)) and len(cursor) == 3:
+            try:
+                return tuple(int(value or 0) for value in cursor)
+            except (TypeError, ValueError, OverflowError):
+                return None
+        return None
+
+    def _remember_db(self, message_id):
+        if not message_id or message_id in self._db_seen:
+            return False
+        self._db_seen.add(message_id)
+        self._db_seen_order.append(message_id)
+        while len(self._db_seen_order) > 10000:
+            self._db_seen.discard(self._db_seen_order.popleft())
+        return True
+
+    def _emit_db_messages(self, source, talker, title, rows, historical):
+        messages = []
+        for row in rows:
+            if not isinstance(row, dict) or not self._remember_db(str(row.get("id") or "")):
+                continue
+            message = dict(row)
+            message.pop("_cursor", None)
+            message["source"] = "wechat_db"
+            message["historical"] = bool(historical)
+            messages.append(message)
+        if not messages:
+            return
+        session_type = "group" if str(talker).endswith("@chatroom") else "private"
+        sid = talker
+        self._announce_session(sid, title, "wechat_db", session_type, talker)
+        self._emit("messages", {"session_id": sid, "title": title, "source": "wechat_db",
+                                 "messages": messages, "historical": bool(historical),
+                                 "type": session_type, "talker": talker})
+
+    def _run_wechat_db(self):
+        """Poll known database session heads. This path never initializes WGC/OCR."""
+        source = self._new_wechat_db_source()
+        self._db_seen.clear()
+        self._db_seen_order.clear()
+        loaded_contexts = set()
+        sessions = source.sessions(limit=500)
+        labels = {}
+        offset = 0
+        while not self._stop.is_set():
+            page = sessions if offset == 0 else source.sessions(limit=500, offset=offset)
+            for item in page:
+                if not isinstance(item, dict):
+                    continue
+                talker = str(item.get("id") or "")
+                if talker:
+                    labels[talker] = str(item.get("name") or talker)
+            offset += len(page)
+            if len(page) < 500:
+                break
+            if offset >= 100000:
+                raise RuntimeError("微信会话数量超过当前监测上限")
+
+        baseline = {}
+        offset = 0
+        while not self._stop.is_set():
+            heads = source.latest_session_heads(limit=500, offset=offset)
+            for head in heads:
+                if isinstance(head, dict) and head.get("id"):
+                    talker = str(head["id"])
+                    baseline[talker] = self._db_head_marker(head)
+            offset += len(heads)
+            if len(heads) < 500:
+                break
+            if offset >= 100000:
+                raise RuntimeError("微信会话数量超过当前监测上限，已拒绝建立不完整基线")
+        # A small number of old message tables can be absent from SessionTable.
+        # Seed their last known IDs as historical so the first later index
+        # appearance is not mistaken for a brand-new conversation history.
+        for talker in labels:
+            if talker in baseline or talker.startswith("wxdb:"):
+                continue
+            latest = source.messages(talker, limit=1)
+            if latest and (cursor := self._db_cursor(latest[0])):
+                baseline[talker] = (cursor[0], int(latest[0].get("timestamp") or 0), cursor[2], 0)
+
+        # Present the newest known session and its bounded context immediately;
+        # the initial batch is always historical and cannot trigger a reply.
+        if sessions:
+            first = sessions[0]
+            talker = str(first.get("id") or "")
+            if talker and talker in labels:
+                title = labels[talker]
+                sid = talker
+                session_type = first.get("type") if first.get("type") in ("private", "group") else None
+                self._announce_session(sid, title, "wechat_db", session_type, talker)
+                limit = min(200, max(10, int(self._config.get("context_limit", 50))))
+                initial = source.messages(talker, limit=limit)
+                initial = sorted(initial, key=lambda row: self._db_cursor(row) or (0, 0, 0))
+                self._emit_db_messages(source, talker, title, initial, historical=True)
+                loaded_contexts.add(talker)
+
+        self._status("live", "正在只读监听微信本地数据库", "wechat_db")
+        if self._once.is_set() and not self._wanted.is_set():
+            self._once.clear()
+            return
+
+        poll_seconds = max(.25, min(float(self._config.get("db_poll_seconds", .75)), 5.0))
+        while self._wanted.is_set() and not self._stop.is_set() and not self._restart.is_set():
+            self._drain_requests()
+            if self._once.is_set():
+                self._once.clear()
+                return
+            try:
+                current_heads = source.latest_session_heads(limit=500)
+                for head in current_heads:
+                    if not isinstance(head, dict):
+                        continue
+                    talker = str(head.get("id") or "")
+                    if not talker:
+                        continue
+                    if talker not in labels:
+                        for item in source.sessions(limit=500):
+                            if isinstance(item, dict) and item.get("id") == talker:
+                                labels[talker] = str(item.get("name") or talker)
+                                break
+                    if talker not in labels:
+                        continue
+                    marker = self._db_head_marker(head)
+                    previous = baseline.get(talker)
+                    if previous is None:
+                        baseline[talker] = marker
+                        continue
+                    if marker == previous:
+                        continue
+                    title = labels[talker]
+                    latest = source.messages(talker, limit=min(200, max(20, int(self._config.get("context_limit", 50)))))
+                    latest = sorted(latest, key=lambda row: self._db_cursor(row) or (0, 0, 0))
+                    # Commit the watermark only after the bounded message read
+                    # succeeds; a transient read failure must be retried.
+                    baseline[talker] = marker
+                    baseline_local_id = previous[2]
+                    # Find the previous committed head in the bounded page.
+                    # If it vanished (many rapid messages, shard rollover, or
+                    # stale metadata), show context but do not declare liveness.
+                    prior_index = next((index for index, row in enumerate(latest)
+                                        if self._db_cursor(row) and self._db_cursor(row)[2] == baseline_local_id
+                                        and int(row.get("timestamp") or 0) == previous[1]), None)
+                    if talker not in loaded_contexts:
+                        context = latest[:prior_index + 1] if prior_index is not None else latest
+                        self._emit_db_messages(source, talker, title, context, historical=True)
+                        loaded_contexts.add(talker)
+                    for index, row in enumerate(latest):
+                        cursor = self._db_cursor(row)
+                        if not cursor or (prior_index is not None and index <= prior_index):
+                            continue
+                        msg = dict(row)
+                        msg_id = str(msg.get("id") or "")
+                        if not msg_id or msg_id in self._db_seen:
+                            continue
+                        stamp = msg.get("timestamp")
+                        try:
+                            stamp = float(stamp)
+                            # Millisecond timestamps are normalized only for age checks.
+                            age_stamp = stamp / 1000 if stamp > 10_000_000_000 else stamp
+                        except (TypeError, ValueError, OverflowError):
+                            age_stamp = 0
+                        eligible = (prior_index is not None and msg.get("side") == "other" and msg.get("kind") == "text"
+                                    and 0 <= time.time() - age_stamp <= 300)
+                        self._emit_db_messages(source, talker, title, [msg], historical=not eligible)
+                    self._status("live", "正在只读监听微信本地数据库", "wechat_db")
+            except Exception:
+                # Do not expose paths, SQL, key material, or message data.
+                self._status("error", "微信本地数据库暂时无法读取；请检查账号与文件状态", "wechat_db")
+                self._stop.wait(1)
+                continue
+            self._stop.wait(poll_seconds)
 
     def _close_capture(self):
         cap, self._cap = self._cap, None
@@ -505,6 +743,122 @@ class CaptureService:
             pass
         return result
 
+    def _send_db_worker(self, task):
+        """Use DB for chat state; inspect only WeChat's title and composer."""
+        from app.auto_send import send_verified, _assert_target, _press_enter
+        from app.capture import chat_area
+        from app.ocr import _engine, read_title
+        from app.winapi import libraries, window_title
+        from desk.store import normalize_title
+
+        source = self._new_wechat_db_source()
+        sid = task["session_id"]
+        labels = []
+        offset = 0
+        while offset < 100000:
+            page = source.sessions(limit=500, offset=offset)
+            for item in page:
+                if isinstance(item, dict) and item.get("id"):
+                    labels.append((str(item["id"]), str(item.get("name") or item["id"])))
+            offset += len(page)
+            if len(page) < 500:
+                break
+        if offset >= 100000:
+            raise RuntimeError("会话目录过大，无法完成发送身份核验")
+        title = next((name for ident, name in labels if ident == sid), None)
+        if not title or not normalize_title(title):
+            raise RuntimeError("数据库中找不到可核验的目标会话")
+        if sum(normalize_title(name) == normalize_title(title) for _, name in labels) != 1:
+            raise RuntimeError("存在同名会话，无法仅凭微信标题安全确认目标")
+
+        def current_inbound():
+            messages = source.messages(sid, limit=1)
+            return bool(messages and messages[0].get("id") == task["message_id"]
+                        and messages[0].get("side") == "other"
+                        and messages[0].get("kind") == "text")
+
+        if not current_inbound():
+            raise RuntimeError("目标会话已有更新，旧消息不会自动回复")
+        self._close_capture()
+        self._ensure_capture()
+        hwnd, native = self._hwnd, self._native_title
+        u, _, _ = libraries()
+
+        def target_frame():
+            if task["cancelled"].is_set() or self._stop.is_set() or task["epoch"] != self._control_epoch:
+                raise RuntimeError("数据库发送已取消")
+            full, at = self._frame(wait=2)
+            area = chat_area(full)
+            if area is None:
+                raise RuntimeError("无法定位微信会话标题与输入框")
+            x0, y0, x1, y1, _, pane = area
+            observed = read_title(full[pane:y0, x0:x1])
+            if not observed or normalize_title(observed) != normalize_title(title):
+                raise RuntimeError("微信当前会话标题与数据库目标不一致")
+            if time.monotonic() - at > 1 or self._hwnd != hwnd or window_title(hwnd) != native:
+                raise RuntimeError("微信目标窗口或标题画面已变化")
+            self._cap.area = area
+            return full, area[:4], at
+
+        def verify():
+            return target_frame()[1]
+
+        def inspect_composer():
+            full, area, at = target_frame()
+            x0, _, x1, y1 = area
+            height = full.shape[0]
+            if height - y1 < 85 or x1 - x0 < 200:
+                raise RuntimeError("微信输入区域过小")
+            composer = full[y1 + 30:height - 42, x0 + 24:x1 - 72]
+            if not composer.size:
+                raise RuntimeError("无法定位微信输入框")
+            rows, _ = _engine()(composer, use_cls=False)
+            value = ''.join(str(row[1]) for row in sorted(rows or [],
+                            key=lambda row: (row[0][0][1], row[0][0][0])))
+            return {"text": value.strip(), "focused": bool(u.GetForegroundWindow() == hwnd),
+                    "target_ok": True, "at": at}
+
+        def press_if_still_armed():
+            with self._lock:
+                if task["cancelled"].is_set() or self._stop.is_set() or task["epoch"] != self._control_epoch:
+                    raise RuntimeError("数据库发送已取消")
+                if not current_inbound():
+                    raise RuntimeError("发送前数据库入站消息已变化")
+                target_frame()
+                _assert_target(hwnd, native)
+                self._send_audit("before_enter", task)
+                if not current_inbound():
+                    raise RuntimeError("最终发送前最新入站消息已变化")
+                _assert_target(hwnd, native)
+                _press_enter()
+                try:
+                    self._send_audit("enter_called", task)
+                except OSError:
+                    pass
+
+        try:
+            area = verify()
+            result = send_verified(hwnd, area, task["text"], verify=verify,
+                                   inspect_composer=inspect_composer,
+                                   expected_window_title=native,
+                                   press_send=press_if_still_armed)
+            # Delivery evidence comes from the same DB session, never OCR chat.
+            deadline = time.monotonic() + 7
+            while time.monotonic() < deadline:
+                latest = source.messages(sid, limit=1)
+                if (latest and latest[0].get("side") == "me"
+                        and str(latest[0].get("text") or "").strip() == task["text"]):
+                    result = {"success": True, "status": "sent",
+                              "message": "已从目标会话数据库确认发出的消息"}
+                    break
+                if task["cancelled"].is_set() or self._stop.is_set():
+                    break
+                time.sleep(.25)
+            self._send_audit("send_result", task, result.get("status", "unconfirmed"))
+            return result
+        finally:
+            self._close_capture()
+
     def _drain_requests(self):
         while True:
             try:
@@ -514,10 +868,11 @@ class CaptureService:
             try:
                 if task["cancelled"].is_set() or self._stop.is_set():
                     raise RuntimeError("填入请求已取消")
-                task["result"] = self._send_worker(task) if task.get('mode') == 'send' else self._fill_worker(task)
+                task["result"] = (self._send_db_worker(task) if task.get("mode") == "send_db" else
+                                  self._send_worker(task) if task.get('mode') == 'send' else self._fill_worker(task))
             except Exception as exc:
                 task["error"] = str(exc)[:200]
-                if task.get("mode") == "send":
+                if task.get("mode") in ("send", "send_db"):
                     try:
                         self._send_audit('blocked', task)
                     except OSError:
@@ -648,6 +1003,9 @@ class CaptureService:
                     if source == "weflow":
                         self._status("searching", "正在连接本机 WeFlow", source)
                         self._run_weflow()
+                    elif source == "wechat_db":
+                        self._status("searching", "正在连接微信本地数据库", source)
+                        self._run_wechat_db()
                     else:
                         if self._cap is None:
                             self._status("searching", "正在查找微信窗口", "ocr")
