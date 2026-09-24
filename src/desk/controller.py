@@ -46,7 +46,8 @@ class Controller(QObject):
         self.store = Store(directory)
         self.imports = ChatLabImporter(directory)
         self.hub = DataHub(on_update=lambda kind, data: self.dataEvent.emit(kind, data))
-        self.capture = CaptureService(lambda k, p: self.captureEvent.emit(k, p))
+        self.capture = CaptureService(lambda k, p: self.captureEvent.emit(k, p),
+                                      Path(directory) / 'send-audit.jsonl')
         self.pool = HelperTasks()
         self.models = ModelTasks()
         self.sessions = {s['id']: s for s in self.store.load_history() if isinstance(s, dict) and s.get('id')}
@@ -97,6 +98,7 @@ class Controller(QObject):
         self.auto_running_trigger = None
         self.auto_epoch = 0
         self.auto_send_busy = False
+        self.auto_deferred = None
         self.catchup = {'session_id': None, 'status': 'idle', 'reason': ''}
         self.catchup_serial = 0
         self.catchup_busy = False
@@ -183,6 +185,7 @@ class Controller(QObject):
         self.auto_epoch += 1
         self.auto_trigger = None
         self.auto_running_trigger = None
+        self.auto_deferred = None
         if self.catchup_busy:
             self.catchup_serial += 1
             self.catchup_busy = False
@@ -285,7 +288,7 @@ class Controller(QObject):
         return self._auto_public()
 
     def _auto_observe(self, session, message, capture_event):
-        if not self.auto_policy['enabled'] or self.auto_paused or self.auto_send_busy:
+        if not self.auto_policy['enabled'] or self.auto_paused:
             return None
         if message.get('side') != 'other' or message.get('kind', 'text') != 'text' or not str(message.get('text') or '').strip():
             return None
@@ -296,6 +299,14 @@ class Controller(QObject):
         if chosen['type'] == 'group' and not str(message.get('sender') or '').strip():
             self.auto_detail = '群聊发言人无法核对，未自动回复。'
             return None
+        if self.auto_send_busy:
+            # Coalesce a burst to its newest incoming turn. The send completion
+            # will recheck that this is still the latest message before judging.
+            self.auto_deferred = {'session_id': sid, 'message_id': message['id'],
+                                  'source': capture_event.get('source'),
+                                  'observed_at': time.time()}
+            self.auto_detail = '发送中收到新消息；完成后将重新核对最新一轮。'
+            return None
         counters = self._auto_public()
         if counters['sent_hour'] >= self.auto_policy['hourly_limit'] or counters['sent_day'] >= self.auto_policy['daily_limit']:
             self.auto_detail = '自动回复已达到发送上限，未为这条消息调用模型。'
@@ -304,7 +315,7 @@ class Controller(QObject):
         source = capture_event.get('source')
         event = {'source': source, 'historical': bool(capture_event.get('historical')),
                  'incoming': True, 'live_visible': source == 'ocr' and sid == self.live_id,
-                 'timestamp': time.time()}
+                 'timestamp': capture_event.get('observed_at') or time.time()}
         observed = self.auto_guard.observe(typed, message, event, {'auto_reply_enabled': True}, self.auto_policy)
         if not observed.allow:
             return None
@@ -320,7 +331,7 @@ class Controller(QObject):
         self.auto_detail = '已检测到允许会话的新消息，正在等待对方发完并准备回复。'
         return max(0, int((observed.ready_at - time.time()) * 1000))
 
-    def _auto_dispatch(self, trigger, result):
+    def _auto_dispatch(self, trigger, result, judged):
         sid = trigger['session_id']
         if (not self.auto_policy['enabled'] or self.auto_paused or self.auto_send_busy or
                 trigger['epoch'] != self.auto_epoch or sid != self.live_id or
@@ -335,9 +346,16 @@ class Controller(QObject):
         if isinstance(risk, bool) or not isinstance(risk, (int, float)) or not 0 <= risk <= 3:
             self._auto_record(sid, 'skipped', '风险判断较高或缺失，未自动发送')
             return
-        if result.get('should_reply') is not True:
-            self._auto_record(sid, 'skipped', 'Jev 未明确认为实质回复适合当前时刻')
+        if (judged.get('should_reply') is not True or
+                judged.get('target_message_id') != trigger['message']['id']):
+            self._auto_record(sid, 'skipped', 'Jev 未明确认为现在值得回复这条消息')
             return
+        if trigger['type'] == 'group' and self.auto_policy['group_mode'] == 'all':
+            confidence = judged.get('confidence')
+            if (isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or
+                    confidence < 0.85):
+                self._auto_record(sid, 'skipped', '群聊未明确指向我，Jev 回复置信度不足')
+                return
         prior = next((str(m.get('text') or '') for m in reversed(session['messages'][:-1])
                       if m.get('kind', 'text') == 'text' and str(m.get('text') or '').strip()), '')
         if not prior:
@@ -378,7 +396,10 @@ class Controller(QObject):
             self._auto_record(sid, 'failed', '发送任务启动失败')
 
     def _emit_auto_send_done(self, sid, epoch, future):
-        if self.closed or future.cancelled():
+        if self.closed:
+            return
+        if future.cancelled():
+            self.autoSendFinished.emit(sid, {'epoch': epoch}, '自动发送任务已取消')
             return
         try:
             self.autoSendFinished.emit(sid, {'epoch': epoch, 'result': future.result()}, None)
@@ -403,13 +424,36 @@ class Controller(QObject):
             self._auto_record(sid, 'failed', '安全核验或发送失败，已暂停')
             self.auto_detail = '安全核验未通过，自动回复已暂停。'
         self._save_auto_state()
+        self._resume_deferred_auto()
         self.emit()
 
-    def _prepare_catchup_task(self, cfg, session, chat_type, own_display_name):
+    def _resume_deferred_auto(self):
+        deferred, self.auto_deferred = self.auto_deferred, None
+        if (not deferred or not self.auto_policy['enabled'] or self.auto_paused or
+                self.auto_send_busy or self.status['capture'] != 'live'):
+            return
+        sid = deferred['session_id']
+        session = self.sessions.get(sid)
+        if (sid != self.live_id or not session or not session.get('messages') or
+                session['messages'][-1].get('id') != deferred['message_id']):
+            return
+        message = session['messages'][-1]
+        if message.get('side') != 'other':
+            return
+        delay = self._auto_observe(session, message, {
+            'source': deferred['source'], 'historical': False,
+            'observed_at': deferred['observed_at']})
+        if delay is not None:
+            self.pending = sid
+            self.pending_manual = False
+            self.timer.start(max(self.store.config['debounce_ms'], delay))
+
+    def _prepare_catchup_task(self, cfg, session, chat_type, own_display_name, group_mode):
         judged = self.models.submit('judge_backlog', {
             'messages': session['messages'], 'config': cfg, 'chat_type': chat_type,
             'chat_name': session['title'], 'own_display_name': own_display_name,
-            'current_session_acknowledged': True}).result(timeout=180)
+            'current_session_acknowledged': True,
+            'group_mode': group_mode}).result(timeout=180)
         if judged.get('should_reply') is not True:
             return {'judged': judged, 'analysis': None}
         draft_config = dict(cfg)
@@ -419,6 +463,20 @@ class Controller(QObject):
         analyzed = self.models.submit('analyze', {'messages': session['messages'],
             'config': draft_config, 'background': '', 'history': None, 'reply_to': None}).result(timeout=180)
         return {'judged': judged, 'analysis': analyzed}
+
+    def _prepare_live_auto_task(self, cfg, session, analysis_payload, trigger, group_mode):
+        """Require a typed send-now judgment before paying for a draft."""
+        judged = self.models.submit('judge_backlog', {
+            'messages': session['messages'], 'config': cfg, 'chat_type': trigger['type'],
+            'chat_name': session['title'], 'own_display_name': '',
+            'current_session_acknowledged': True, 'group_mode': group_mode,
+            'require_prior_self': False if trigger['type'] == 'group' else True}).result(timeout=180)
+        if (judged.get('should_reply') is not True or
+                judged.get('target_message_id') != trigger['message']['id']):
+            return {'_auto_decision': judged}
+        analyzed = self.models.submit('analyze', analysis_payload).result(timeout=180)
+        analyzed['_auto_decision'] = judged
+        return analyzed
 
     def _catch_up_once(self, params):
         if params.get('acknowledge_send') is not True:
@@ -455,7 +513,8 @@ class Controller(QObject):
         self.catchup = {'session_id': sid, 'status': 'judging',
                         'reason': '正在判断最近一轮历史来信是否仍值得回复。'}
         try:
-            future = self.pool.submit(self._prepare_catchup_task, cfg, frozen, chosen['type'], own_display_name)
+            future = self.pool.submit(self._prepare_catchup_task, cfg, frozen, chosen['type'],
+                                      own_display_name, self.auto_policy['group_mode'])
             future.add_done_callback(lambda done: self._emit_catchup_prepared(serial, sid, fingerprint, done))
         except Exception:
             self.catchup_busy = False
@@ -1467,11 +1526,21 @@ class Controller(QObject):
         self.emit()
         history = session['messages'][:-cfg['context_limit']][-30:] if cfg['save_history'] else None
         try:
-            future = self.models.submit('analyze', {'messages': session['messages'], 'config': cfg,
-                        'background': background, 'history': history, 'reply_to': cfg.get('reply_to') or None})
+            analysis_payload = {'messages': session['messages'], 'config': cfg,
+                        'background': background, 'history': history, 'reply_to': cfg.get('reply_to') or None}
+            if self.auto_running_trigger:
+                future = self.pool.submit(self._prepare_live_auto_task, cfg, session, analysis_payload,
+                                          copy.deepcopy(self.auto_running_trigger), self.auto_policy['group_mode'])
+            else:
+                future = self.models.submit('analyze', analysis_payload)
         except Exception as exc:
             self.inflight = None
             self.status.update(analysis='error', last_error=self.safe_error(exc))
+            if self.auto_running_trigger:
+                self.auto_running_trigger = None
+                self.auto_paused = True
+                self.auto_detail = '实时判断任务未能启动，自动回复已暂停。'
+                self._auto_record(ident, 'failed', '实时判断任务启动失败')
             self.emit()
             return
         def work(completed):
@@ -1500,11 +1569,29 @@ class Controller(QObject):
                     self.auto_detail = '模型分析失败，自动回复已暂停。'
                     self._auto_record(ident, 'failed', '模型分析失败')
             elif self.fingerprint(self.sessions[ident]) == fingerprint:
-                self.results[ident] = result
-                self.result_fingerprints[ident] = fingerprint
                 self.status.update(analysis='idle', last_error='')
                 if auto_trigger:
-                    self._auto_dispatch(auto_trigger, result)
+                    judged = result.pop('_auto_decision', None) if isinstance(result, dict) else None
+                    self.results.pop(ident, None)
+                    self.result_fingerprints.pop(ident, None)
+                    if not isinstance(judged, dict):
+                        self.auto_paused = True
+                        self.auto_detail = '实时回复判断结果缺失，自动回复已暂停。'
+                        self._auto_record(ident, 'failed', 'Jev 实时回复判断缺失')
+                    elif judged.get('reason') == 'provider_or_protocol_failure':
+                        self.auto_paused = True
+                        self.auto_detail = 'Jev 实时回复判断服务暂不可用，自动回复已暂停。'
+                        self._auto_record(ident, 'failed', 'Jev 实时回复判断服务不可用')
+                    elif judged.get('should_reply') is not True or judged.get('target_message_id') != auto_trigger['message']['id']:
+                        self._auto_record(ident, 'skipped', 'Jev 判断当前来信不需要回复')
+                        self.auto_detail = 'Jev 判断这条新消息无需回复，继续等待。'
+                    else:
+                        self.results[ident] = result
+                        self.result_fingerprints[ident] = fingerprint
+                        self._auto_dispatch(auto_trigger, result, judged)
+                else:
+                    self.results[ident] = result
+                    self.result_fingerprints[ident] = fingerprint
             else:
                 self.status['analysis'] = 'idle'
                 if ((self.store.config['auto_analyze'] or self.auto_policy['enabled']) and self.status['capture'] == 'live'

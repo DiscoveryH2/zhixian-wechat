@@ -101,12 +101,19 @@ html[data-theme="night"] .moment-media-tile { background: #243a29; border-color:
 .auto-reply-status-icon { display:grid; place-items:center; width:42px;height:42px;border-radius:13px;background:#edf2ec;color:#829184; }
 .auto-reply-status-copy { min-width:0; }.auto-reply-kicker,.auto-reply-confirm-copy .eyebrow { display:block;color:var(--scene-muted);font-size:9px;letter-spacing:1.3px;text-transform:uppercase;margin-bottom:3px; }
 .auto-reply-status-copy h2 { font-size:16px; }.auto-reply-status-copy p { margin-top:3px;color:var(--scene-muted);font-size:11px; }
+.auto-reply-status-copy .auto-reply-live-explainer { color:#39724c;font-weight:600; }
 .auto-reply-status-actions { display:flex;gap:7px;justify-content:flex-end;flex-wrap:wrap; }
 .auto-reply-status.active { border-color:#9ec3a7; background:linear-gradient(110deg,#f3f8f1,#fff); }.auto-reply-status.active .auto-reply-status-icon { color:#277552;background:#dfefe2; }
 .auto-reply-status.paused { border-color:#d6c395;background:#fffaf0; }.auto-reply-status.paused .auto-reply-status-icon { color:#9a7840;background:#f6edda; }
 .auto-reply-status.error { border-color:#d69b8e;background:#fff6f3; }.auto-reply-status.error .auto-reply-status-icon { color:#a54c3f;background:#f8e4df; }
 .auto-reply-settings,.auto-reply-recent { padding:22px; margin-bottom:17px; }
 .auto-reply-catchup { padding:22px; margin-bottom:17px; border-color:#d8c08f; }
+.auto-reply-current-session { display:grid;grid-template-columns:minmax(100px,.3fr) minmax(180px,1fr) auto;align-items:center;gap:7px 12px;padding:13px 15px;margin:0 0 14px;border:1px solid var(--scene-line);border-radius:10px;background:var(--scene-soft, #f6f7f1); }
+.auto-reply-current-session-label { color:var(--scene-muted);font-size:10px; }
+.auto-reply-current-session strong { display:flex;align-items:center;gap:7px;min-width:0;font-size:12px; }
+.auto-reply-session-tag { padding:4px 7px;border-radius:5px;background:#e8eee3;color:#5b7351;font-size:9px;font-weight:500;white-space:nowrap; }
+.auto-reply-session-risk { grid-column:1/-1;color:var(--scene-muted);font-size:10px;line-height:1.6; }
+.auto-reply-single-action { min-height:40px;padding:0 17px;font-size:12px; }
 .auto-reply-catchup-select { max-width:520px; margin-bottom:8px; }
 .auto-reply-catchup-hint { max-width:800px; line-height:1.75; margin:0 0 13px; }
 .auto-reply-catchup-state { margin-top:10px; color:var(--scene-muted); font-size:10px; line-height:1.6; }
@@ -129,6 +136,9 @@ html[data-theme="night"] .auto-reply-status.active { background:linear-gradient(
 html[data-theme="night"] .auto-reply-status-icon,html[data-theme="night"] .auto-reply-avatar{background:#304631;color:#a6c298;}html[data-theme="night"] .auto-reply-avatar.group{background:#40422d;color:#c2c18e;}html[data-theme="night"] .auto-reply-outcome{background:#314732;color:#a7c99d;}html[data-theme="night"] .auto-reply-outcome.skipped{background:#413b2b;color:#d1bc8d;}html[data-theme="night"] .auto-reply-outcome.failed{background:#4a302d;color:#e0a59a;}html[data-theme="night"] .auto-reply-outcome.simulated{background:#293b50;color:#b5cee9;}
 html[data-theme="night"] .auto-reply-confirm-check{background:#3b3526;border-color:#76633f;color:#e0d0a9;}html[data-theme="night"] .catalog-multi-row.selected .catalog-choice{background:#2d482f;border-color:#577754;color:#b0d2a8;}
 html[data-theme="night"] .auto-reply-catchup { border-color:#76633f; }
+html[data-theme="night"] .auto-reply-current-session { background:#292e26;border-color:#4d5748; }
+html[data-theme="night"] .auto-reply-session-tag { background:#364331;color:#c0d2b7; }
+html[data-theme="night"] .auto-reply-status-copy .auto-reply-live-explainer { color:#b5d9ad; }
 @media(max-width:650px){.auto-reply-status{grid-template-columns:40px minmax(0,1fr);}.auto-reply-status-actions{grid-column:1/-1;justify-content:flex-start;}.auto-reply-settings,.auto-reply-recent{padding:17px;}.auto-reply-event{grid-template-columns:65px minmax(0,1fr) auto;gap:8px;}.auto-reply-event-reason{grid-column:2;grid-row:2;}.auto-reply-event time{grid-column:3;grid-row:1;}.auto-reply-form-footer{align-items:flex-start;}.auto-reply-form-footer .field-hint{max-width:65%;}.auto-reply-section-head{align-items:flex-start;}}
 html[data-theme="night"] .status-chip.auto-reply-chip{background:#29452f;border-color:#547e59;color:#b9dbb1;}html[data-theme="night"] .status-chip.auto-reply-chip.error{background:#4b302e;border-color:#82564f;color:#e6b6ac;}
 

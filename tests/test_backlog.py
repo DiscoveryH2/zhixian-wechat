@@ -90,6 +90,38 @@ class BacklogTests(unittest.TestCase):
         self.assertTrue(prefilter_backlog(marked, chat_type="group", chat_name="Synthetic Group", now=NOW)["eligible"])
         self.assertEqual(prefilter_backlog(group, chat_type="group", chat_name="Synthetic Group", own_display_name="River", now=NOW)["reason"], "group_not_explicitly_directed")
 
+    def test_explicit_group_all_can_judge_without_prior_self_but_needs_high_confidence(self):
+        rows = [{"id": "g-previous", "side": "other", "sender": "A", "text": "大家怎么看？",
+                 "timestamp": NOW.timestamp() - 60},
+                {"id": "g-latest", "side": "other", "sender": "B", "text": "有人用过这个方案吗？",
+                 "timestamp": NOW.timestamp()}]
+        self.assertEqual(prefilter_backlog(rows, chat_type="group", now=NOW)["reason"],
+                         "no_prior_self_message")
+        allowed = prefilter_backlog(rows, chat_type="group", group_mode="all",
+                                    require_prior_self=False, now=NOW)
+        self.assertTrue(allowed["eligible"])
+        self.assertTrue(allowed["group_unaddressed"])
+        uncertain = evaluate_backlog(rows, config(), chat_type="group", group_mode="all",
+                                     require_prior_self=False, now=NOW,
+                                     post_json_fn=responder("reply", 0.8))
+        strong = evaluate_backlog(rows, config(), chat_type="group", group_mode="all",
+                                  require_prior_self=False, now=NOW,
+                                  post_json_fn=responder("reply", 0.9))
+        self.assertIsNone(uncertain["should_reply"])
+        self.assertIs(strong["should_reply"], True)
+
+    def test_group_all_prior_self_requirement_defaults_on_and_can_be_disabled(self):
+        rows = [{"id": "g-latest", "side": "other", "sender": "B",
+                 "text": "有人用过这个方案吗？", "timestamp": NOW.timestamp()}]
+        denied = evaluate_backlog(rows, config(), chat_type="group", group_mode="all", now=NOW,
+                                  post_json_fn=responder("reply", 0.95))
+        allowed = evaluate_backlog(rows, config(), chat_type="group", group_mode="all", now=NOW,
+                                   require_prior_self=False, post_json_fn=responder("reply", 0.95))
+        self.assertIs(denied["should_reply"], False)
+        self.assertEqual(denied["reason"], "no_prior_self_message")
+        self.assertIs(allowed["should_reply"], True)
+        self.assertEqual(allowed["target_message_id"], "g-latest")
+
 
     def test_provider_failure_malformed_and_ambiguous_never_fabricate_positive(self):
         failed = evaluate_backlog(history(), config(), chat_name="Synthetic Contact", now=NOW,

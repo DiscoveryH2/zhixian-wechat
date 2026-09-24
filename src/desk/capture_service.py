@@ -6,8 +6,12 @@ run without Windows, OCR, Qt, or an installed capture backend.
 from __future__ import annotations
 
 from collections import deque
+import json
+import os
+from pathlib import Path
 import queue
 import re
+import secrets
 import threading
 import time
 
@@ -72,8 +76,10 @@ class ScreenHistory:
 
 
 class CaptureService:
-    def __init__(self, callback):
+    def __init__(self, callback, audit_path=None):
         self.callback = callback
+        self.audit_path = Path(audit_path) if audit_path else None
+        self._audit_targets = {}
         self._config = {}
         self._lock = threading.RLock()
         self._wanted = threading.Event()
@@ -98,6 +104,23 @@ class CaptureService:
         self._wf_loaded = set()
         self._config_revision = 0
         self._control_epoch = 0
+
+    def _send_audit(self, stage, task, status=""):
+        """Record sender provenance without retaining titles, drafts or keys."""
+        if self.audit_path is None:
+            return
+        target_ref = self._audit_targets.get(task["title"])
+        if target_ref is None:
+            target_ref = self._audit_targets[task["title"]] = secrets.token_hex(8)
+        record = {"at": time.time(), "pid": os.getpid(), "stage": stage,
+                  "target_ref": target_ref,
+                  "status": status}
+        payload = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+        self.audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.audit_path.open("ab") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
 
     def _emit(self, kind, payload):
         if self._stop.is_set():
@@ -341,7 +364,7 @@ class CaptureService:
         return fill(hwnd, area, task["text"], verify=verify, expected_window_title=native)
 
     def _send_worker(self, task):
-        from app.auto_send import send_verified, _press_enter
+        from app.auto_send import send_verified, _press_enter, _assert_target
         from app.ocr import Reader, _engine
         from app.winapi import libraries, window_title
         self._close_capture()
@@ -408,7 +431,15 @@ class CaptureService:
             with self._lock:
                 if task['cancelled'].is_set() or self._stop.is_set() or task['epoch'] != self._control_epoch:
                     raise RuntimeError('自动发送已取消')
+                _assert_target(hwnd, native)
+                self._send_audit('before_enter', task)
+                _assert_target(hwnd, native)
                 _press_enter()
+                try:
+                    self._send_audit('enter_called', task)
+                except OSError:
+                    # Enter may already have reached WeChat. Never retry it.
+                    pass
         result = send_verified(hwnd, area, task['text'], verify=verify,
                                inspect_composer=inspect_composer, expected_window_title=native,
                                press_send=press_if_still_armed)
@@ -426,6 +457,10 @@ class CaptureService:
                 result = {'success': True, 'status': 'sent', 'message': '已在当前微信会话确认新发出的文字气泡'}
         except Exception:
             pass
+        try:
+            self._send_audit('send_result', task, result.get('status', 'unconfirmed'))
+        except OSError:
+            pass
         return result
 
     def _drain_requests(self):
@@ -440,6 +475,11 @@ class CaptureService:
                 task["result"] = self._send_worker(task) if task.get('mode') == 'send' else self._fill_worker(task)
             except Exception as exc:
                 task["error"] = str(exc)[:200]
+                if task.get("mode") == "send":
+                    try:
+                        self._send_audit('blocked', task)
+                    except OSError:
+                        pass
             finally:
                 task["done"].set()
 

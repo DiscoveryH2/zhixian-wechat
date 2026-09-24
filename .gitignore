@@ -1,5 +1,6 @@
 # Personal runtime state and generated deliverables never belong in source Git.
 data/
+**/send-audit.jsonl
 work/
 outputs/
 .venv/

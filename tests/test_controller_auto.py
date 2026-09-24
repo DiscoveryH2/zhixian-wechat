@@ -3,7 +3,7 @@ import sys
 import tempfile
 import time
 import unittest
-from concurrent.futures import Future
+from threading import Event
 from pathlib import Path
 from unittest.mock import patch
 
@@ -59,6 +59,12 @@ class AutoControllerTests(unittest.TestCase):
         if self.ctrl.auto_trigger:
             self.ctrl.auto_trigger['ready_at'] = time.time() - 1
 
+    def _prepared(self, decision=None, analysis=None):
+        decision = decision or {'should_reply': True, 'target_message_id': 'msg-new', 'confidence': 0.95}
+        analysis = analysis or {'risk': 1, 'should_reply': True, 'best_index': 0,
+                                'candidates': [{'text': 'Yes, let us discuss it.'}]}
+        return {**analysis, '_auto_decision': decision}
+
     def test_default_off_and_start_requires_explicit_acknowledgment(self):
         self.assertFalse(self.ctrl.snapshot()['auto_reply']['enabled'])
         with self.assertRaises(ValueError):
@@ -76,16 +82,25 @@ class AutoControllerTests(unittest.TestCase):
         self.assertEqual(self.ctrl.pending, self.sid)
         self.assertTrue(self.ctrl.timer.isActive())
 
+    def test_new_incoming_during_send_is_reconsidered_after_send_completes(self):
+        self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})
+        self.ctrl.auto_send_busy = True
+        self._incoming(ident='arrived-during-send')
+        self.assertIsNone(self.ctrl.auto_trigger)
+        self.assertEqual(self.ctrl.auto_deferred['message_id'], 'arrived-during-send')
+        self.ctrl._on_auto_sent(self.sid, {'result': {'status': 'sent'}}, None)
+        self.assertFalse(self.ctrl.auto_send_busy)
+        self.assertIsNone(self.ctrl.auto_deferred)
+        self.assertEqual(self.ctrl.auto_trigger['message']['id'], 'arrived-during-send')
+        self.capture_type.return_value.send.assert_not_called()
+
     def test_only_new_allowed_message_claims_once_and_calls_verified_sender(self):
         self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})
         self._incoming()
         self.assertIsNotNone(self.ctrl.auto_trigger)
         self._make_ready()
-        response = Future()
-        response.set_result({'risk': 1, 'should_reply': True, 'best_index': 0, 'candidates': [{'text': 'Yes, let us discuss it.'}],
-                             'answers': {'synthetic': {'choice': 'ok'}}})
         self.capture_type.return_value.send.return_value = {'success': True, 'status': 'sent'}
-        with patch.object(self.ctrl.models, 'submit', return_value=response):
+        with patch.object(self.ctrl, '_prepare_live_auto_task', return_value=self._prepared()):
             self.ctrl._run_pending()
             self._drain(lambda: self.ctrl.auto_recent and self.ctrl.auto_recent[-1]['status'] == 'sent')
         self.capture_type.return_value.send.assert_called_once_with(
@@ -99,25 +114,52 @@ class AutoControllerTests(unittest.TestCase):
         self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})
         self._incoming()
         self._make_ready()
-        response = Future()
-        response.set_result({'risk': None, 'should_reply': True, 'best_index': None, 'candidates': [{'text': 'Maybe.'}]})
-        with patch.object(self.ctrl.models, 'submit', return_value=response):
+        bad = self._prepared(analysis={'risk': None, 'should_reply': True, 'best_index': None,
+                                       'candidates': [{'text': 'Maybe.'}]})
+        with patch.object(self.ctrl, '_prepare_live_auto_task', return_value=bad):
             self.ctrl._run_pending()
             self._drain(lambda: bool(self.ctrl.auto_recent))
         self.capture_type.return_value.send.assert_not_called()
         self.assertEqual(self.ctrl.auto_recent[-1]['status'], 'skipped')
 
-    def test_jev_non_reply_or_midlevel_risk_never_sends(self):
+    def test_typed_skip_never_sends_or_needs_analysis(self):
         self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})
-        for ident, should, risk in [('non-reply', False, 1), ('risk-four', True, 4)]:
+        self._incoming()
+        self._make_ready()
+        skipped = {'_auto_decision': {'should_reply': False, 'target_message_id': 'msg-new',
+                                     'confidence': 1.0, 'reason': 'not_needed'}}
+        with patch.object(self.ctrl, '_prepare_live_auto_task', return_value=skipped):
+            self.ctrl._run_pending()
+            self._drain(lambda: bool(self.ctrl.auto_recent))
+        self.capture_type.return_value.send.assert_not_called()
+        self.assertEqual(self.ctrl.auto_recent[-1]['status'], 'skipped')
+
+    def test_typed_yes_allows_safe_holding_reply_even_if_analysis_says_no(self):
+        self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})
+        self._incoming()
+        self._make_ready()
+        prepared = self._prepared(analysis={'risk': 1, 'should_reply': False, 'best_index': 0,
+                                             'candidates': [{'text': 'I will check and get back to you.'}]})
+        self.capture_type.return_value.send.return_value = {'success': True, 'status': 'sent'}
+        with patch.object(self.ctrl, '_prepare_live_auto_task', return_value=prepared):
+            self.ctrl._run_pending()
+            self._drain(lambda: self.ctrl.auto_recent and self.ctrl.auto_recent[-1]['status'] == 'sent')
+        self.capture_type.return_value.send.assert_called_once()
+        self.assertEqual(self.capture_type.return_value.send.call_args.args[0],
+                         'I will check and get back to you.' + AUTO_DISCLOSURE)
+
+    def test_analysis_non_reply_or_midlevel_risk_never_sends(self):
+        self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})
+        for ident, risk in [('risk-four', 4)]:
             with self.subTest(ident=ident):
                 self._incoming(ident=ident)
                 self._make_ready()
-                response = Future()
-                response.set_result({'risk': risk, 'should_reply': should, 'best_index': 0,
-                                     'candidates': [{'text': 'Synthetic candidate.'}]})
+                prepared = self._prepared({'should_reply': True, 'target_message_id': ident,
+                                           'confidence': 0.95},
+                    {'risk': risk, 'should_reply': True, 'best_index': 0,
+                     'candidates': [{'text': 'Synthetic candidate.'}]})
                 before = len(self.ctrl.auto_recent)
-                with patch.object(self.ctrl.models, 'submit', return_value=response):
+                with patch.object(self.ctrl, '_prepare_live_auto_task', return_value=prepared):
                     self.ctrl._run_pending()
                     self._drain(lambda: len(self.ctrl.auto_recent) > before)
                 self.assertEqual(self.ctrl.auto_recent[-1]['status'], 'skipped')
@@ -127,11 +169,12 @@ class AutoControllerTests(unittest.TestCase):
         self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})
         self._incoming(ident='msg-disclosure')
         self._make_ready()
-        response = Future()
-        response.set_result({'risk': 0, 'should_reply': True, 'best_index': 0,
+        prepared = self._prepared({'should_reply': True, 'target_message_id': 'msg-disclosure',
+                                   'confidence': 0.95},
+            {'risk': 0, 'should_reply': True, 'best_index': 0,
                              'candidates': [{'text': 'Okay.' + AUTO_DISCLOSURE}]})
         self.capture_type.return_value.send.return_value = {'success': True, 'status': 'sent'}
-        with patch.object(self.ctrl.models, 'submit', return_value=response):
+        with patch.object(self.ctrl, '_prepare_live_auto_task', return_value=prepared):
             self.ctrl._run_pending()
             self._drain(lambda: self.ctrl.auto_recent and self.ctrl.auto_recent[-1]['status'] == 'sent')
         sent_text = self.capture_type.return_value.send.call_args.args[0]
@@ -150,16 +193,34 @@ class AutoControllerTests(unittest.TestCase):
         self._incoming(ident='group-2')
         self.assertEqual(self.ctrl.auto_trigger['message']['id'], 'group-2')
 
+    def test_group_all_skips_when_typed_confidence_is_low(self):
+        self.ctrl.handle('configure_auto_reply', {'allowlist': [
+            {'session_id': self.sid, 'type': 'group'}], 'group_mode': 'all'})
+        self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})
+        self._incoming(ident='group-question', text='Does anybody know this?')
+        self._make_ready()
+        prepared = self._prepared({'should_reply': True, 'target_message_id': 'group-question',
+                                   'confidence': 0.7},
+            {'risk': 1, 'should_reply': True, 'best_index': 0,
+             'candidates': [{'text': 'Synthetic answer.'}]})
+        with patch.object(self.ctrl, '_prepare_live_auto_task', return_value=prepared):
+            self.ctrl._run_pending()
+            self._drain(lambda: bool(self.ctrl.auto_recent))
+        self.capture_type.return_value.send.assert_not_called()
+        self.assertEqual(self.ctrl.auto_recent[-1]['status'], 'skipped')
+
     def test_emergency_stop_invalidates_inflight_analysis(self):
         self.ctrl.handle('start_auto_reply', {'acknowledge_send': True})
         self._incoming()
         self._make_ready()
-        response = Future()
-        with patch.object(self.ctrl.models, 'submit', return_value=response):
+        release = Event()
+        def prepare(*args):
+            release.wait(1)
+            return self._prepared()
+        with patch.object(self.ctrl, '_prepare_live_auto_task', side_effect=prepare):
             self.ctrl._run_pending()
             self.ctrl.handle('stop_auto_reply', {'emergency': True})
-            response.set_result({'risk': 0, 'should_reply': True, 'best_index': 0,
-                                 'candidates': [{'text': 'This must not send.'}]})
+            release.set()
             self._drain(lambda: self.ctrl.inflight is None)
         self.capture_type.return_value.send.assert_not_called()
         self.assertFalse(self.ctrl.snapshot()['auto_reply']['enabled'])
