@@ -982,6 +982,50 @@ class Controller(QObject):
                 'next_cursor': page.get('next_cursor'), 'has_more': bool(page.get('has_more'))},
                 'page': page}
 
+    def _run_agent_task(self, source_config, model_config, selected):
+        """Read only the selected latest pages before entering the isolated model process."""
+        sessions = []
+        for sid, known in selected:
+            source = known.get('source') or ''
+            if source in ('ocr', 'manual'):
+                session = known
+            else:
+                try:
+                    page = self._session_page_task(source_config, sid, None, 40)
+                except Exception:
+                    raise ValueError('无法读取所选会话，请检查数据来源后重试。') from None
+                if not page.get('available') and not page.get('items'):
+                    raise ValueError('所选会话当前不可读取，请检查数据来源后重试。')
+                session = {**known, 'messages': page.get('items') or []}
+                # A fresh source page can replace an in-memory transcript or
+                # image description added by an explicit user media action.
+                understood = {str(item.get('id')): item for item in known.get('messages', [])
+                              if isinstance(item, dict) and (item.get('transcript') or item.get('image_description'))}
+                for item in session['messages']:
+                    cached = understood.get(str(item.get('id'))) if isinstance(item, dict) else None
+                    if cached and item.get('kind') == cached.get('kind') and isinstance(cached.get('text'), str):
+                        item['text'] = cached['text']
+            messages = []
+            for raw in (session.get('messages') or [])[-40:]:
+                if not isinstance(raw, dict):
+                    continue
+                messages.append({
+                    'id': str(raw.get('id') or '')[:128],
+                    'side': raw.get('side') if raw.get('side') in ('me', 'other') else 'unknown',
+                    'sender': str(raw.get('sender') or '')[:80],
+                    'kind': raw.get('kind') if raw.get('kind') in ('text', 'image', 'voice') else 'text' if isinstance(raw.get('text'), str) and raw['text'].strip() else 'unknown',
+                    'text': str(raw.get('text') or '')[:1200],
+                    'timestamp': raw.get('timestamp') if isinstance(raw.get('timestamp'), (int, float, str)) else None,
+                    'directed_to_me': raw.get('directed_to_me') is True,
+                })
+            sessions.append({
+                'id': sid, 'title': str(session.get('title') or '未命名会话')[:200],
+                'type': session.get('type') if session.get('type') in ('private', 'group') else 'unknown',
+                'source': str(session.get('source') or '')[:30],
+                'messages': messages,
+            })
+        return self.models.submit('run_agent', {'sessions': sessions, 'config': model_config}).result(timeout=185)
+
     def _load_page(self, config, sid, cursor=None, limit=30):
         page = self._session_page_task(config, sid, cursor, limit)
         return page
@@ -1190,6 +1234,28 @@ class Controller(QObject):
             return self._stop_auto(emergency=bool(params.get('emergency')))
         if method == 'catch_up_auto_reply':
             return self._catch_up_once(params)
+        if method == 'run_agent':
+            raw = params.get('session_ids')
+            if not isinstance(raw, list) or not 1 <= len(raw) <= 3:
+                raise ValueError('请从会话目录选择 1 至 3 个会话。')
+            ids = [str(value) for value in raw]
+            if any(not value or len(value) > 256 for value in ids) or len(set(ids)) != len(ids):
+                raise ValueError('会话选择无效，请重新选择。')
+            if not self.store.secrets['api_key']:
+                raise ValueError('请先在设置中填写 Jev API Key。')
+            with self.catalog_lock:
+                catalog = {sid: copy.deepcopy(self.catalog_items.get(sid)) for sid in ids}
+            selected = []
+            for sid in ids:
+                session = copy.deepcopy(self.sessions.get(sid) or catalog.get(sid))
+                if not session:
+                    raise ValueError('会话目录已更新，请重新选择需要巡检的会话。')
+                selected.append((sid, session))
+            source_config = self.store.full_config()
+            model_keys = ('api_key', 'base_url', 'model_name', 'reply_api_key', 'reply_base_url',
+                          'reply_model', 'relationship', 'style', 'context_limit', 'timeout')
+            model_config = {key: source_config[key] for key in model_keys if key in source_config}
+            return self.pool.submit(self._run_agent_task, source_config, model_config, selected)
         if method == 'list_sessions':
             config = self.store.full_config()
             # The worker must not iterate mutable Qt-owned session state.

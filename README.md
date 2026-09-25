@@ -6,9 +6,9 @@
 
 A Windows WeChat conversation assistant with read-only local SQLCipher history, optional OCR, Jev judgments, reply drafts, and tightly scoped automatic replies.
 
-**当前版本：1.5.3 预览版** · [下载 v1.5.3 预览版](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.5.3) · [1.5.3 发行说明](docs/releases/1.5.3.md) · [快速开始](#快速开始) · [更新记录](CHANGELOG.md) · [隐私说明](docs/PRIVACY.md)
+**当前版本：1.6.0 预览版** · [下载 v1.6.0 预览版](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.6.0) · [1.6.0 发行说明](docs/releases/1.6.0.md) · [快速开始](#快速开始) · [更新记录](CHANGELOG.md) · [隐私说明](docs/PRIVACY.md)
 
-**1.5.3 预览版** 修复托盘微信的静止窗口画面在发送核验时过期、导致明明检测到群消息却在发送前失败的问题；自动回复页会显示具体安全核验原因。后台读取和发送范围见[1.5.1 发行说明](docs/releases/1.5.1.md)，本次修复及验收边界见[1.5.3 发行说明](docs/releases/1.5.3.md)。
+**1.6.0 预览版** 新增「知弦 Agent」会话巡检：明确选择至多三个会话后，按需查看近期对话、判断当前动作并展示可核对的消息证据和工具步骤。Agent 不会发送微信消息；已有自动回复功能继续单独受白名单、发送核验和限额约束。背景与验证边界见[1.6.0 发行说明](docs/releases/1.6.0.md)。
 
 ## 看看界面
 
@@ -34,6 +34,12 @@ A Windows WeChat conversation assistant with read-only local SQLCipher history, 
 
 ![知弦 PC 自动回复控制台，展示合成会话和模拟状态](docs/images/auto-reply.png)
 
+### 知弦 Agent
+
+选定会话后，会话卡片同时展示建议动作、所依据的消息和本轮工具记录。
+
+![知弦 Agent 合成演示：会话建议与消息依据](docs/images/agent.png)
+
 ### 精简模式
 
 保留当前判断和候选，适合放在微信旁边，也可以设置窗口置顶。
@@ -46,7 +52,7 @@ A Windows WeChat conversation assistant with read-only local SQLCipher history, 
 
 目标环境为 **Windows 10 / Windows 11、微信 Windows 4.x**。本机数据库模式需要当前 Windows 用户已有可用的 CipherTalk 账号配置；窗口布局、缩放和微信版本仍会影响可见会话的发送核验。当前不提供 macOS 或 Linux 客户端。
 
-1. 从 [v1.5.3 预览版 Release](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.5.3) 下载 Windows 便携包，**完整解压**后运行 `Zhixian.exe`。便携版包含 Python、SQLCipher 和离线 OCR 运行环境，不需要另装 Python、Node 或安卓手机。
+1. 从 [v1.6.0 预览版 Release](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.6.0) 下载 Windows 便携包，**完整解压**后运行 `Zhixian.exe`。便携版包含 Python、SQLCipher 和离线 OCR 运行环境，不需要另装 Python、Node 或安卓手机。
 2. 在设置中填写下面三项，点击“测试连接”，确认结果后保存。
 3. 若已有 CipherTalk 账号配置，在设置中选择“本机微信数据库”，点击“开始观察”；打开会话目录选择要分析的联系人或群聊。数据库读取可在微信最小化或收至托盘时继续；自动发送仅处理微信原本已打开的目标会话，届时知弦会短暂恢复窗口核验。没有该配置时可继续使用默认 OCR、WeFlow 或导入记录。
 
@@ -67,6 +73,7 @@ A Windows WeChat conversation assistant with read-only local SQLCipher history, 
 - **读取本机聊天**：从微信 4.x 加密数据库直接只读连接，按会话分页读取历史与最新消息；已有 CipherTalk 配置时无需截图识别聊天正文。OCR 仍作为可选的当前窗口来源。
 - **分析对话**：展示字面含义、可能意图、需求、建议行动、危险等级、是否适合实质回应与回应升级风险。
 - **准备回复**：生成最多三条候选，并由 Jev 排序；生成失败时仍保留有效判断，缺失的分数不会被编造。
+- **知弦 Agent 巡检**：在独立页面从会话目录选定最多三个联系人或群聊，按需读取每个会话最近最多四十条消息。Agent 依次检查可用证据、请求 Jev 做结构化下一步判断，并仅对明确值得行动的会话尝试起草候选；结果显示真实消息 ID、原文节选、判断把握和工具步骤。没有足够文字、模型回答无效或服务不可用时转为人工复核，不猜测媒体内容。巡检结果仅在本次界面中保留，不写入新档案。
 - **手动确认或受限自动回复**：默认由你检查、填入和发送。可选自动回复每次启动均关闭，必须逐项启用会话白名单；新来信先经独立的 Jev「现在是否值得回复」判断，再分析风险、生成候选并排序。数据库模式使用消息 ID 复核最新入站消息，只在微信窗口标题能唯一对应目标会话、输入框为空且草稿匹配时由知弦进程发送；不会自动切换到屏幕外会话。自动回复添加 `（以上内容为知弦生成）`。脱敏发送阶段记录位于本机 `data/send-audit.jsonl`，不记录聊天正文、候选、标题或 Key。
 - **补充背景**：本地联系人、姓名别名、关系、备注，以及支持标签和常驻背景的知识笔记。
 - **查找和翻阅会话**：按名称搜索联系人与群聊，先显示一页会话及最后消息摘要，再逐页加载历史；图片、语音等消息保留类型标签。
@@ -78,6 +85,12 @@ A Windows WeChat conversation assistant with read-only local SQLCipher history, 
 - **其他数据源**：已有兼容版 WeFlow 的用户仍可通过本机 HTTP / SSE 读取消息。
 
 Jev 的意图、风险和概率是**基于有限上下文的模型估计**，不代表对方的真实想法，也不保证回复效果。上游 `should_reply_now` 关注下一条回复是否应包含实质内容，不是自动发送或立即发送的指令。自动回复与一次性历史补回复的适用条件、限制和验证状态见[1.5.3 发行说明](docs/releases/1.5.3.md)。
+
+### 知弦 Agent 如何使用
+
+打开左侧「知弦 Agent」，点击“选择会话”在独立会话目录中选 1–3 个目标，然后运行一次巡检。它会把建议分为现在回复、稍后跟进、继续等待、无需动作或请你复核；证据片段直接取自本次读取的消息，方便回到微信核对。若生成了候选，可以复制后自行修改和发送。每次巡检只使用当前选中的会话，不会自动扩展到整个聊天库，也没有发送权限；想让知弦持续自动回复，仍需在独立的「自动回复」页按该功能规则启用。
+
+Agent 框架采用固定的 `读取近期历史 → Jev typed 判断 → 条件性候选起草 → 证据卡片` 工具链。模型返回的聊天文字不能变更工具、会话范围或发送策略；每步有上限和可见的运行记录。只有已取得文字的媒体描述或语音转写才可能参与判断；单独的 `[图片]` / `[语音]` 标签不会被当作图片或音频内容。更多数据流见[隐私说明](docs/PRIVACY.md)。
 
 ## 数据来源与范围
 

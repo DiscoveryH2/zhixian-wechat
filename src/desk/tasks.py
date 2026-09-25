@@ -23,6 +23,9 @@ def _model_job(pipe, kind, payload):
         elif kind == 'judge_backlog':
             from core.backlog import evaluate_backlog
             result = evaluate_backlog(**payload)
+        elif kind == 'run_agent':
+            from core.agent import run_agent
+            result = run_agent(**payload)
         else:
             raise ValueError('未识别的模型任务。')
         pipe.send((True, result))

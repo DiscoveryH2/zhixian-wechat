@@ -101,16 +101,35 @@ def main():
             if 'synthetic-smoke-only' in str(controller.snapshot()):
                 return fail('Credential leaked into UI snapshot')
             view.grab().save(str(ROOT / 'work/ui-bridge-synthetic.png'))
+            view.page().runJavaScript("[...document.querySelectorAll('#navigation button')].find(b=>b.textContent.includes('知弦 Agent'))?.click()")
+            state['phase'] = 4
+        elif state['phase'] == 4 and dom['agent_page']:
+            view.page().runJavaScript("document.querySelector('.agent-mission button')?.click()")
+            state['phase'] = 5
+        elif state['phase'] == 5 and dom['catalog_open']:
+            view.page().runJavaScript("document.querySelector('#session-catalog [data-filter=collected]')?.click()")
+            state['phase'] = 6
+        elif state['phase'] == 6 and dom['catalog_row']:
+            view.page().runJavaScript("document.querySelector('#session-catalog .catalog-row')?.click();setTimeout(()=>[...document.querySelectorAll('#session-catalog button')].find(b=>b.textContent.includes('应用选择'))?.click(),150)")
+            state['phase'] = 7
+        elif state['phase'] == 7 and dom['agent_selected']:
+            view.page().runJavaScript("[...document.querySelectorAll('.agent-run-row button')].find(b=>b.textContent.includes('开始分诊'))?.click()")
+            state['phase'] = 8
+        elif state['phase'] == 8 and dom['agent_card']:
+            if '模拟回应一' not in dom['text'] or not dom['agent_trace']:
+                view.grab().save(str(ROOT / 'work/ui-agent-bridge-failed.png'))
+                return fail('Agent bridge result, candidate, or trace missing')
+            view.grab().save(str(ROOT / 'work/ui-agent-bridge-synthetic.png'))
             state['success'] = True
             app.quit()
             return
         QTimer.singleShot(100, tick)
 
     def tick():
-        script = "JSON.stringify({onboarding:!!document.querySelector('#onboarding-form'),text:document.body.innerText})"
+        script = "JSON.stringify({onboarding:!!document.querySelector('#onboarding-form'),text:document.body.innerText,agent_page:!!document.querySelector('.agent-page'),catalog_open:!!document.querySelector('#session-catalog[open]'),catalog_row:!!document.querySelector('#session-catalog .catalog-row'),agent_selected:!!document.querySelector('.agent-selected-row'),agent_card:!!document.querySelector('.agent-card'),agent_trace:!!document.querySelector('.agent-trace')})"
         view.page().runJavaScript(script, inspect)
     QTimer.singleShot(300, tick)
-    QTimer.singleShot(30000, lambda: fail('UI bridge integration timed out at phase ' + str(state['phase'])))
+    QTimer.singleShot(60000, lambda: fail('UI bridge integration timed out at phase ' + str(state['phase'])))
     app.exec()
     controller.close()
     server.shutdown()

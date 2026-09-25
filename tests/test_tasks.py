@@ -23,6 +23,15 @@ class ModelProcessTests(unittest.TestCase):
                 time.sleep(parent.delay)
                 if 'reply_now' in request.get('questions', {}):
                     answers = {'reply_now': {'type': 'choice', 'choice': 'reply', 'confidence': 0.9}}
+                elif 'next_step' in request.get('questions', {}):
+                    answers = {}
+                    for key, question in request['questions'].items():
+                        if question['type'] == 'choice':
+                            answers[key] = {'type': 'choice', 'choice': 'reply_now', 'confidence': .9}
+                        elif question['type'] == 'score':
+                            answers[key] = {'type': 'score', 'score': 1, 'confidence': .9}
+                        else:
+                            answers[key] = {'type': 'noul', 'noul': .9}
                 else:
                     answers = {'connection': {'type': 'noul', 'noul': 1}}
                 data = json.dumps({'answers': answers}).encode()
@@ -70,6 +79,18 @@ class ModelProcessTests(unittest.TestCase):
             'chat_name': 'Synthetic Contact'}).result(timeout=15)
         self.assertIs(result['should_reply'], True)
         self.assertEqual(result['target_message_id'], 'synthetic-in')
+
+    def test_spawned_agent_uses_typed_protocol_without_send_tool(self):
+        now = time.time()
+        result = self.tasks.submit('run_agent', {'sessions': [{
+            'id': 'synthetic-session', 'title': '合成联系人', 'type': 'private', 'source': 'manual',
+            'messages': [
+                {'id': 'm1', 'side': 'me', 'kind': 'text', 'text': '明天再说。', 'timestamp': now - 60},
+                {'id': 'm2', 'side': 'other', 'kind': 'text', 'text': '可以定个时间吗？', 'timestamp': now - 30},
+            ]}], 'config': self.config}).result(timeout=20)
+        self.assertEqual(result['cards'][0]['action'], 'reply_now')
+        self.assertEqual(result['cards'][0]['evidence'][-1]['message_id'], 'm2')
+        self.assertIn('jev.triage', [step['tool'] for step in result['trace']])
 
 
 if __name__ == '__main__':

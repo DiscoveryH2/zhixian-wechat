@@ -32,6 +32,8 @@ docs/                     公开文档与合成演示截图
 
 `data/` 是个人运行数据；`work/`、`outputs/` 和 `.venv/` 是本机构建或开发产物。它们不应随源码发布。
 
+`src/core/agent.py` 实现独立的知弦 Agent 巡检运行时；`Controller.handle('run_agent')` 只接收用户明确选定的会话 ID，按需读取最近消息页，再把有界快照交给 `ModelTasks` 的隔离子进程。Agent 工具清单是静态允许列表，不接受模型或聊天文本发出的任意函数名；没有发送工具。输出中的证据必须绑定本次输入的真实消息 ID，模型服务失败时保留人工复核状态。开发和测试均使用合成聊天，不能把数据库只读测试当成真实自动发送验证。
+
 ## 不接触真实聊天的开发方式
 
 ```powershell
@@ -76,6 +78,8 @@ Jev 请求使用 `state` 与 `questions`，响应需包含有效的 typed `answe
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 .\.venv\Scripts\python.exe -m compileall -q src
 .\.venv\Scripts\python.exe scripts/smoke_bridge.py
+node --check ui/app.js
+node --check ui/experience.js
 ```
 
 单元测试覆盖模型协议、路由和错误处理、消息方向和去重、安全回填拒绝、存储及会话状态；合成 OCR 测试使用本机离线模型识别生成的中文图像。`smoke_bridge.py` 通过本机模拟接口检查 QtWebChannel 到后端的完整链路。
@@ -90,7 +94,7 @@ Jev 请求使用 `state` 与 `questions`，响应需包含有效的 typed `answe
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/build.ps1
-.\.venv\Scripts\python.exe scripts/package_portable.py --input outputs/build/Zhixian --output outputs/Zhixian-1.4.1-Windows.zip
+.\.venv\Scripts\python.exe scripts/package_portable.py --input outputs/build/Zhixian --output outputs/Zhixian-1.6.0-Windows.zip
 ```
 
 构建脚本先运行测试，再使用 PyInstaller 生成 `outputs/build/Zhixian/`，收集上游和运行组件的许可文件。打包脚本从该目录生成便携 ZIP，排除应用个人数据文件。构建目标如果已有用户数据，脚本会拒绝覆盖；可通过 `-OutputDirectory` 选择新的构建目录。
@@ -100,7 +104,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build.ps1
 ## 发布前
 
 1. 运行测试、合成演示界面和打包启动验证。
-2. 检查应用版本、发行文件名与[发行说明](releases/1.4.1.md)一致。
+2. 检查应用版本、发行文件名与[发行说明](releases/1.6.0.md)一致。
 3. 检查 ZIP 清单，确认不含 `data/`、真实聊天、凭据、私人笔记或开发环境。
 4. 保留本项目 LICENSE、上游 LICENSE / NOTICE 和第三方运行组件许可；新增字体等资源也要包含对应许可。
 5. 使用合成数据制作公开截图，说明已验证的环境和仍存在的兼容性限制。

@@ -52,7 +52,7 @@
   const pending = new Map();
   let bridge = null, counter = 0, page = 'workspace', compact = window.innerWidth <= 640, online = false, search = '', currentState;
   let renderQueued = false, experience = null, lastWorkspaceKey = null, lastAutoReplyKey = null;
-  const blank = () => ({ config: { base_url: '', model_name: '', has_api_key: false, reply_model: '', reply_base_url: '', has_reply_api_key: false, relationship: '朋友', style: '自然简洁', auto_analyze: true, context_limit: 30, save_history: false, always_on_top: false, source: 'ocr', weflow_url: 'http://127.0.0.1:5031', weflow_has_token: false, debounce_ms: 1800 }, status: { capture: 'idle', analysis: 'idle', detail: '等待开始读取微信', last_error: '', source: 'ocr', connected: false }, auto_reply: { enabled: false, paused: false, status: 'off', detail: '', allowlist: [], group_mode: 'mention_only', debounce_seconds: 4, cooldown_seconds: 45, hourly_limit: 8, daily_limit: 40, sent_hour: 0, sent_day: 0, recent: [] }, sessions: [], current_session: null, analysis: null, notes: [], contacts: [], version: '1.5.3' });
+  const blank = () => ({ config: { base_url: '', model_name: '', has_api_key: false, reply_model: '', reply_base_url: '', has_reply_api_key: false, relationship: '朋友', style: '自然简洁', auto_analyze: true, context_limit: 30, save_history: false, always_on_top: false, source: 'ocr', weflow_url: 'http://127.0.0.1:5031', weflow_has_token: false, debounce_ms: 1800 }, status: { capture: 'idle', analysis: 'idle', detail: '等待开始读取微信', last_error: '', source: 'ocr', connected: false }, auto_reply: { enabled: false, paused: false, status: 'off', detail: '', allowlist: [], group_mode: 'mention_only', debounce_seconds: 4, cooldown_seconds: 45, hourly_limit: 8, daily_limit: 40, sent_hour: 0, sent_day: 0, recent: [] }, sessions: [], current_session: null, analysis: null, notes: [], contacts: [], version: '1.6.0' });
   currentState = blank();
   const configured = () => currentState.config.has_api_key && currentState.config.base_url && currentState.config.model_name;
   const live = () => ['live', 'searching'].includes(currentState.status.capture);
@@ -72,7 +72,7 @@
     if (!bridge) return Promise.reject(new Error('请通过「启动知弦」桌面入口打开，浏览器预览无法连接微信。'));
     return new Promise((resolve, reject) => {
       const id = String(++counter);
-      const timeout = setTimeout(() => { pending.delete(id); reject(new Error('操作等待超时，请检查模型连接或微信窗口后重试。')); }, method === 'import_chat_records' ? 600000 : ['analyze', 'test_connection', 'analyze_moment', 'transcribe_voice', 'analyze_image', 'choose_media'].includes(method) ? 180000 : 45000);
+      const timeout = setTimeout(() => { pending.delete(id); reject(new Error('操作等待超时，请检查模型连接或微信窗口后重试。')); }, method === 'import_chat_records' ? 600000 : method === 'run_agent' ? 210000 : ['analyze', 'test_connection', 'analyze_moment', 'transcribe_voice', 'analyze_image', 'choose_media'].includes(method) ? 180000 : 45000);
       pending.set(id, { resolve, reject, timeout });
       try { bridge.request(JSON.stringify({ id, method, params })); } catch (err) { clearTimeout(timeout); pending.delete(id); reject(err); }
     });
@@ -124,7 +124,7 @@
   async function toggleCompact() { const enabled = !compact; await rpc('set_compact', { enabled }); compact = enabled; $('#app').classList.toggle('compact', compact); render(true); }
   function renderNavigation() {
     const nav = $('#navigation'); nav.replaceChildren();
-    for (const [id, label, name] of [['workspace', '工作台', 'chat'], ['auto-reply', '自动回复', 'pulse'], ['moments', '朋友圈', 'moments'], ['knowledge', '知识库', 'book'], ['contacts', '联系人', 'people'], ['appearance', '外观', 'palette'], ['settings', '设置', 'settings']]) {
+    for (const [id, label, name] of [['workspace', '工作台', 'chat'], ['agent', '知弦 Agent', 'spark'], ['auto-reply', '自动回复', 'pulse'], ['moments', '朋友圈', 'moments'], ['knowledge', '知识库', 'book'], ['contacts', '联系人', 'people'], ['appearance', '外观', 'palette'], ['settings', '设置', 'settings']]) {
       const b = el('button', `nav-button${page === id ? ' active' : ''}`); b.type = 'button'; b.setAttribute('aria-label', label); b.setAttribute('aria-current', page === id ? 'page' : 'false'); b.title = label;
       append(b, icon(name, 21), el('span', '', label)); b.addEventListener('click', () => go(id)); nav.append(b);
     }
@@ -140,7 +140,7 @@
     chip.className = `status-chip ${autoReplyLabel ? `auto-reply-chip ${autoReply.enabled && !autoReply.paused ? 'running' : autoReply.status === 'emergency' ? 'error' : ''}` : status.analysis === 'running' ? 'running' : status.capture === 'live' ? 'live' : status.capture === 'error' ? 'error' : ''}`;
     $('#footer-status').textContent = status.detail || '本地工作台已就绪';
     $('#footer-meta').textContent = currentState.config.model_name ? `${currentState.config.model_name} · ${sourceLabel(currentState.config.source)}` : 'Jev · 语境与判断';
-    $('#version').textContent = String(currentState.version || '1.5.3');
+    $('#version').textContent = String(currentState.version || '1.6.0');
     $('#demo-label').hidden = !demo;
     $('#mini-expand').hidden = !compact;
     renderNavigation();
@@ -162,6 +162,7 @@
     else if (page === 'settings') main.replaceChildren(settings());
     else if (page === 'appearance') main.replaceChildren(experience.renderAppearance());
     else if (page === 'auto-reply') main.replaceChildren(experience.renderAutoReply());
+    else if (page === 'agent') main.replaceChildren(experience.renderAgent());
     else if (page === 'moments') main.replaceChildren(experience.renderMoments());
     else main.replaceChildren(collection(page));
     if (page === 'workspace') lastWorkspaceKey = workspaceKey;
@@ -489,6 +490,18 @@
   async function demoRequest(method, params) {
     if (!demoSnapshot) initializeDemo();
     if (method === 'bootstrap') return structuredClone(demoSnapshot);
+    if (method === 'run_agent') {
+      const ids = Array.isArray(params.session_ids) ? params.session_ids.slice(0, 3) : [];
+      if (!ids.length) throw new Error('请先选择至少一段合成对话。');
+      await new Promise(resolve => setTimeout(resolve, 700));
+      const cards = ids.map((id, i) => {
+        const session = demoSessions.get(id) || (demoSnapshot.current_session?.id === id ? demoSnapshot.current_session : demoSnapshot.sessions.find(item => item.id === id));
+        const messages = session?.messages || [];
+        const last = messages.at(-1) || { id: `${id}-sample`, side: 'other', text: session?.preview || '我们找个时间再确认一下？' };
+        return { session_id: id, title: session?.title || '合成会话', action: i === 0 ? 'reply_now' : 'wait', confidence: .82, risk: 1, reason: i === 0 ? '合成演示结果：对方提出了具体后续安排，适合给出简短回应。此结果不来自模型或真实会话。' : '合成演示结果：当前轮次适合先等待，不需要立即发送。此结果不来自模型或真实会话。', evidence: [{ message_id: last.id, side: last.side, text: last.text || '[媒体消息]' }], candidates: i === 0 ? ['好呀，我们可以先约个方便的时间，再把细节对一下。'] : [], status: 'sample' };
+      });
+      return { status: 'done', demo: true, label: '合成演示结果', cards, trace: ids.map(id => ({ session_id: id, tool: 'sample_analysis', status: 'demo_only' })) };
+    }
     if (method === 'import_chat_records') { await new Promise(r => setTimeout(r, 900)); return { success: true, sessions: 16, messages: 128, message: '演示导入完成：16 个合成会话、128 条合成消息。未读取本地文件。' }; }
     if (method === 'list_sessions') { const all = demoSnapshot.sessions.filter(s => (!params.query || s.title.toLowerCase().includes(params.query.toLowerCase())) && (!params.source || params.source === 'all' || params.source === 'collected' ? true : params.source === s.source)); const start = Number(params.cursor || 0), limit = Number(params.limit || 12); return { items: structuredClone(all.slice(start, start + limit)), next_cursor: start + limit < all.length ? String(start + limit) : null, has_more: start + limit < all.length, total: all.length, available: true, source: 'demo' }; }
     if (method === 'load_media') { const message = demoSnapshot.current_session?.messages.find(m => m.id === params.message_id); return message?.kind === 'image' ? { available: true, media_url: 'demo-scene.svg', kind: 'image' } : { available: false, message: '演示语音没有附带音频文件，仅提供合成转写用于展示。' }; }
