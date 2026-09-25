@@ -150,7 +150,7 @@ class ControllerMediaTests(unittest.TestCase):
         self.assertEqual(self.ctrl.media_inputs, {})
 
     def test_media_keys_absent_from_snapshot_and_safe_error_redacts_every_key(self):
-        for name in ('api_key', 'reply_api_key', 'weflow_token', 'vision_api_key', 'stt_api_key'):
+        for name in ('api_key', 'reply_api_key', 'weflow_token', 'vision_api_key', 'stt_api_key', 'work_api_key'):
             self.ctrl.store.secrets[name] = 'synthetic-controller-' + name + '-never-issued'
         public = json.dumps(self.ctrl.snapshot())
         safe = self.ctrl.safe_error(RuntimeError(' '.join(self.ctrl.store.secrets.values())))

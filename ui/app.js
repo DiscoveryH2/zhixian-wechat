@@ -52,7 +52,7 @@
   const pending = new Map();
   let bridge = null, counter = 0, page = 'workspace', compact = window.innerWidth <= 640, online = false, search = '', currentState;
   let renderQueued = false, experience = null, lastWorkspaceKey = null, lastAutoReplyKey = null;
-  const blank = () => ({ config: { base_url: '', model_name: '', has_api_key: false, reply_model: '', reply_base_url: '', has_reply_api_key: false, relationship: '朋友', style: '自然简洁', auto_analyze: true, context_limit: 30, save_history: false, always_on_top: false, source: 'ocr', weflow_url: 'http://127.0.0.1:5031', weflow_has_token: false, debounce_ms: 1800 }, status: { capture: 'idle', analysis: 'idle', detail: '等待开始读取微信', last_error: '', source: 'ocr', connected: false }, auto_reply: { enabled: false, paused: false, status: 'off', detail: '', allowlist: [], group_mode: 'mention_only', debounce_seconds: 4, cooldown_seconds: 45, hourly_limit: 8, daily_limit: 40, sent_hour: 0, sent_day: 0, recent: [] }, sessions: [], current_session: null, analysis: null, notes: [], contacts: [], version: '1.6.0' });
+  const blank = () => ({ config: { base_url: '', model_name: '', has_api_key: false, reply_model: '', reply_base_url: '', has_reply_api_key: false, relationship: '朋友', style: '自然简洁', auto_analyze: true, context_limit: 30, save_history: false, always_on_top: false, source: 'ocr', weflow_url: 'http://127.0.0.1:5031', weflow_has_token: false, debounce_ms: 1800 }, status: { capture: 'idle', analysis: 'idle', detail: '等待开始读取微信', last_error: '', source: 'ocr', connected: false }, auto_reply: { enabled: false, paused: false, status: 'off', detail: '', allowlist: [], group_mode: 'mention_only', debounce_seconds: 4, cooldown_seconds: 45, hourly_limit: 8, daily_limit: 40, sent_hour: 0, sent_day: 0, recent: [] }, sessions: [], current_session: null, analysis: null, notes: [], contacts: [], version: '1.7.0-dev' });
   currentState = blank();
   const configured = () => currentState.config.has_api_key && currentState.config.base_url && currentState.config.model_name;
   const live = () => ['live', 'searching'].includes(currentState.status.capture);
@@ -72,7 +72,7 @@
     if (!bridge) return Promise.reject(new Error('请通过「启动知弦」桌面入口打开，浏览器预览无法连接微信。'));
     return new Promise((resolve, reject) => {
       const id = String(++counter);
-      const timeout = setTimeout(() => { pending.delete(id); reject(new Error('操作等待超时，请检查模型连接或微信窗口后重试。')); }, method === 'import_chat_records' ? 600000 : method === 'run_agent' ? 210000 : ['analyze', 'test_connection', 'analyze_moment', 'transcribe_voice', 'analyze_image', 'choose_media'].includes(method) ? 180000 : 45000);
+      const timeout = setTimeout(() => { pending.delete(id); reject(new Error('操作等待超时，请检查模型连接或微信窗口后重试。')); }, method === 'import_chat_records' ? 600000 : ['work_agent_turn', 'work_agent_test'].includes(method) ? 330000 : method === 'work_agent_attach' ? 120000 : method === 'run_agent' ? 210000 : ['analyze', 'test_connection', 'analyze_moment', 'transcribe_voice', 'analyze_image', 'choose_media'].includes(method) ? 180000 : 45000);
       pending.set(id, { resolve, reject, timeout });
       try { bridge.request(JSON.stringify({ id, method, params })); } catch (err) { clearTimeout(timeout); pending.delete(id); reject(err); }
     });
@@ -124,7 +124,7 @@
   async function toggleCompact() { const enabled = !compact; await rpc('set_compact', { enabled }); compact = enabled; $('#app').classList.toggle('compact', compact); render(true); }
   function renderNavigation() {
     const nav = $('#navigation'); nav.replaceChildren();
-    for (const [id, label, name] of [['workspace', '工作台', 'chat'], ['agent', '知弦 Agent', 'spark'], ['auto-reply', '自动回复', 'pulse'], ['moments', '朋友圈', 'moments'], ['knowledge', '知识库', 'book'], ['contacts', '联系人', 'people'], ['appearance', '外观', 'palette'], ['settings', '设置', 'settings']]) {
+    for (const [id, label, name] of [['workspace', '工作台', 'chat'], ['agent', '工作 Agent', 'spark'], ['auto-reply', '自动回复', 'pulse'], ['moments', '朋友圈', 'moments'], ['knowledge', '知识库', 'book'], ['contacts', '联系人', 'people'], ['appearance', '外观', 'palette'], ['settings', '设置', 'settings']]) {
       const b = el('button', `nav-button${page === id ? ' active' : ''}`); b.type = 'button'; b.setAttribute('aria-label', label); b.setAttribute('aria-current', page === id ? 'page' : 'false'); b.title = label;
       append(b, icon(name, 21), el('span', '', label)); b.addEventListener('click', () => go(id)); nav.append(b);
     }
@@ -140,7 +140,7 @@
     chip.className = `status-chip ${autoReplyLabel ? `auto-reply-chip ${autoReply.enabled && !autoReply.paused ? 'running' : autoReply.status === 'emergency' ? 'error' : ''}` : status.analysis === 'running' ? 'running' : status.capture === 'live' ? 'live' : status.capture === 'error' ? 'error' : ''}`;
     $('#footer-status').textContent = status.detail || '本地工作台已就绪';
     $('#footer-meta').textContent = currentState.config.model_name ? `${currentState.config.model_name} · ${sourceLabel(currentState.config.source)}` : 'Jev · 语境与判断';
-    $('#version').textContent = String(currentState.version || '1.6.0');
+    $('#version').textContent = String(currentState.version || '1.7.0-dev');
     $('#demo-label').hidden = !demo;
     $('#mini-expand').hidden = !compact;
     renderNavigation();
@@ -514,7 +514,7 @@
     if (method === 'choose_background' || method === 'clear_background') { demoSnapshot.appearance.background_url = method === 'choose_background' ? 'demo-scene.svg' : ''; setState(structuredClone(demoSnapshot)); return { appearance: structuredClone(demoSnapshot.appearance) }; }
     if (method === 'transcribe_voice' || method === 'analyze_image') { const m = demoSnapshot.current_session?.messages.find(m => m.id === params.message_id); if (!m) throw new Error('演示消息未找到。'); if (method === 'transcribe_voice') m.transcript = '我想说的是，今晚我们主要看看开头的案例，十几分钟就好。'; else m.image_description = '演示图片：青绿色山峦与落日，用来测试图片消息的展示和分析入口。'; setState(structuredClone(demoSnapshot)); return { transcript: m.transcript, description: m.image_description }; }
     if (method === 'test_connection') return { success: true, message: '演示连接已通过。这是模拟结果，未请求任何模型服务。', mode: 'demo', generation_available: true };
-    if (method === 'save_config') { const c = { ...params.config }; for (const [secret, flag] of [['api_key', 'has_api_key'], ['reply_api_key', 'has_reply_api_key'], ['weflow_token', 'weflow_has_token']]) { if (c[secret]) c[flag] = true; delete c[secret]; } Object.assign(demoSnapshot.config, c); }
+    if (method === 'save_config') { const c = { ...params.config }; for (const [secret, flag] of [['api_key', 'has_api_key'], ['reply_api_key', 'has_reply_api_key'], ['weflow_token', 'weflow_has_token'], ['work_api_key', 'has_work_api_key']]) { if (c[secret]) c[flag] = true; delete c[secret]; } Object.assign(demoSnapshot.config, c); }
     else if (method === 'start_capture') { demoSnapshot.status.capture = 'live'; if (demoSnapshot.current_session?.source === 'ocr') demoSnapshot.current_session.active = true; }
     else if (method === 'pause_capture') { demoSnapshot.status.capture = 'paused'; if (demoSnapshot.current_session) demoSnapshot.current_session.active = false; }
     else if (method === 'configure_auto_reply') { Object.assign(demoSnapshot.auto_reply, params, { enabled: false, paused: false, status: 'off', detail: '演示模式 · 设置仅更新合成状态，不会连接微信或发送消息。' }); }

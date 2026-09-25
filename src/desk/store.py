@@ -14,6 +14,7 @@ from ctypes import wintypes
 DEFAULTS = {
     'base_url': 'https://openrouter.ai/api', 'model_name': 'typesafe/jev-1.13',
     'reply_model': '', 'reply_base_url': '', 'relationship': '朋友', 'style': '', 'reply_to': '',
+    'work_base_url': 'https://openrouter.ai/api/v1', 'work_model': 'deepseek/deepseek-v4.1-flash',
     'auto_analyze': True, 'context_limit': 30, 'save_history': False,
     'always_on_top': False, 'source': 'ocr', 'weflow_url': 'http://127.0.0.1:5031',
     'debounce_ms': 1200,
@@ -21,7 +22,7 @@ DEFAULTS = {
     'vision_model': '', 'vision_base_url': '', 'stt_model': '', 'stt_base_url': '',
     'stt_backend': 'auto', 'stt_local_model': '', 'media_allow_cloud': False,
 }
-SECRETS = ('api_key', 'reply_api_key', 'weflow_token', 'vision_api_key', 'stt_api_key')
+SECRETS = ('api_key', 'reply_api_key', 'weflow_token', 'vision_api_key', 'stt_api_key', 'work_api_key')
 
 
 class Blob(ctypes.Structure):
@@ -101,6 +102,7 @@ class Store:
         with self.lock:
             return {**self.config, 'has_api_key': bool(self.secrets['api_key']),
                     'has_reply_api_key': bool(self.secrets['reply_api_key']),
+                    'has_work_api_key': bool(self.secrets['work_api_key']),
                     'weflow_has_token': bool(self.secrets['weflow_token']),
                     'has_vision_api_key': bool(self.secrets['vision_api_key']),
                     'has_stt_api_key': bool(self.secrets['stt_api_key'])}
@@ -118,7 +120,8 @@ class Store:
         with self.lock:
             config = self.merged(changes)
             for key in ('base_url', 'model_name', 'reply_model', 'reply_base_url', 'style', 'relationship', 'weflow_url', 'reply_to',
-                        'vision_model', 'vision_base_url', 'stt_model', 'stt_base_url', 'stt_local_model'):
+                        'vision_model', 'vision_base_url', 'stt_model', 'stt_base_url', 'stt_local_model',
+                        'work_base_url', 'work_model'):
                 config[key] = str(config.get(key, '')).strip()[:8000 if key == 'style' else 2000]
             if not config['base_url'] or not config['model_name']:
                 raise ValueError('请填写 Base URL 和模型名称。')
@@ -127,6 +130,8 @@ class Store:
             config['base_url'] = validate_url(config['base_url'])
             if config['reply_base_url']:
                 config['reply_base_url'] = validate_url(config['reply_base_url'])
+            if config['work_base_url']:
+                config['work_base_url'] = validate_url(config['work_base_url'])
             for field in ('vision_base_url', 'stt_base_url'):
                 if config[field]:
                     config[field] = validate_url(config[field])

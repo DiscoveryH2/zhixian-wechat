@@ -21,7 +21,10 @@ class ModelProcessTests(unittest.TestCase):
                 request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 received.set()
                 time.sleep(parent.delay)
-                if 'reply_now' in request.get('questions', {}):
+                if self.path.endswith('/chat/completions'):
+                    data = json.dumps({'choices': [{'message': {'role': 'assistant',
+                        'content': '合成 Work Agent 回答'}}]}).encode()
+                elif 'reply_now' in request.get('questions', {}):
                     answers = {'reply_now': {'type': 'choice', 'choice': 'reply', 'confidence': 0.9}}
                 elif 'next_step' in request.get('questions', {}):
                     answers = {}
@@ -34,7 +37,8 @@ class ModelProcessTests(unittest.TestCase):
                             answers[key] = {'type': 'noul', 'noul': .9}
                 else:
                     answers = {'connection': {'type': 'noul', 'noul': 1}}
-                data = json.dumps({'answers': answers}).encode()
+                if not self.path.endswith('/chat/completions'):
+                    data = json.dumps({'answers': answers}).encode()
                 try:
                     self.send_response(200)
                     self.send_header('Content-Length', str(len(data)))
@@ -91,6 +95,15 @@ class ModelProcessTests(unittest.TestCase):
         self.assertEqual(result['cards'][0]['action'], 'reply_now')
         self.assertEqual(result['cards'][0]['evidence'][-1]['message_id'], 'm2')
         self.assertIn('jev.triage', [step['tool'] for step in result['trace']])
+
+    def test_spawned_work_agent_uses_real_loopback_chat_protocol(self):
+        result = self.tasks.submit('work_turn', {'messages': [
+            {'role': 'user', 'content': '把这个任务总结一句话。', 'attachment_ids': []}],
+            'attachments': [], 'config': {
+                'work_base_url': f'http://127.0.0.1:{self.server.server_port}/v1',
+                'work_model': 'synthetic-work', 'work_api_key': ''}}).result(timeout=20)
+        self.assertEqual(result['answer'], '合成 Work Agent 回答')
+        self.assertEqual(result['artifacts'], [])
 
 
 if __name__ == '__main__':

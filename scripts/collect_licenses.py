@@ -6,7 +6,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--output', default=str(Path(__file__).resolve().parents[1] / 'outputs/build/Zhixian/licenses/runtime'))
 root = Path(parser.parse_args().output)
 for name in ('PySide6', 'PySide6_Essentials', 'PySide6_Addons', 'shiboken6', 'numpy',
-             'onnxruntime', 'rapidocr-onnxruntime', 'windows-capture', 'pillow'):
+             'onnxruntime', 'rapidocr-onnxruntime', 'windows-capture', 'pillow', 'pypdf'):
     distribution = metadata.distribution(name)
     for item in distribution.files or []:
         text = str(item)

@@ -8,7 +8,7 @@ window.ZhixianExperience = Object.freeze({
     const moments = { items: [], cursor: null, more: false, loaded: false, busy: false, available: false, source: '', detail: '', error: '', friend: null, results: new Map(), running: new Set(), serial: 0 };
     const histories = new Map(), momentMedia = new Map();
     let appearance = { theme: 'night', font_scale: 1, background_url: '' }, introTimer, searchTimer, importBusy = false, catchupSessionId = '', catchupBusy = false;
-    const agent = { selected: [], result: null, busy: false, error: '', progress: '' };
+    const agent = { selected: [], result: null, busy: false, error: '', progress: '', tab: 'chat', sessions: [], current: null, loading: false, loaded: false, attachments: [], drafts: new Map(), attachmentsBySession: new Map(), config: { work_base_url: '', work_model: '', work_api_key: '' }, configBusy: false, testMessage: '', demoSessions: [] };
 
     function safeMedia(value) {
       if (typeof value !== 'string' || !value || value.length > 28 * 1024 * 1024) return '';
@@ -193,7 +193,7 @@ window.ZhixianExperience = Object.freeze({
       else if (catalog.items.length && !catalog.busy) footer.append(el('span', 'subtle-caption', catalog.available ? '已显示当前目录中的全部匹配会话' : '以上为当前已读取的会话'));
     }
 
-    function renderAgent() {
+    function renderTriage() {
       const root = el('section', 'page agent-page'), selected = agent.selected;
       root.append(heading('知弦 Agent', '一次整理最多三段对话，给出下一步建议和对应依据。', '对话分诊 · 只分析，不发送'));
       const intro = el('section', 'panel agent-mission');
@@ -230,6 +230,155 @@ window.ZhixianExperience = Object.freeze({
       }
       return root;
     }
+    function workInput(label, key, type = 'text', placeholder = '') {
+      const wrap = el('label', 'work-field'); wrap.append(el('span', 'field-label', label));
+      const input = el('input', 'input'); input.type = type; input.autocomplete = 'off'; input.placeholder = placeholder; input.value = type === 'password' ? '' : agent.config[key] || '';
+      input.addEventListener('input', () => { agent.config[key] = input.value; }); wrap.append(input); return wrap;
+    }
+    function workMessage(msg) {
+      const row = el('article', `work-message work-message-${msg.role === 'user' ? 'user' : 'assistant'}`);
+      row.append(el('span', 'work-message-role', msg.role === 'user' ? '你' : '知弦 Agent'), el('div', 'work-message-content', msg.content || ''));
+      const linked = (msg.attachment_ids || []).map(id => (agent.current?.attachments || []).find(a => a.id === id)).filter(Boolean);
+      if (linked.length) { const chips = el('div', 'work-inline-attachments'); for (const file of linked) chips.append(el('span', 'work-file-chip', `${file.kind === 'image' ? '图片' : '文件'} · ${file.name}`)); row.append(chips); }
+      if (msg.role !== 'user' && (msg.sources?.length || msg.trace?.length)) {
+        const details = el('details', 'work-evidence'); details.append(el('summary', '', `来源与工具记录 · ${(msg.sources || []).length} 个来源 · ${(msg.trace || []).length} 项工具`));
+        for (const src of msg.sources || []) details.append(el('div', 'work-evidence-item', `来源 · ${src.name || src.id}`));
+        for (const step of msg.trace || []) details.append(el('div', 'work-evidence-item', `工具 · ${step.tool || '处理'} · ${agentStatusLabel(step.status)}`)); row.append(details);
+      }
+      return row;
+    }
+    async function workRefresh() {
+      if (agent.loading) return; agent.loading = true;
+      try {
+        const response = demo ? { sessions: agent.demoSessions } : await rpc('work_agent_list');
+        agent.sessions = response.sessions || [];
+      } catch (err) { agent.error = errorText(err); }
+      finally { agent.loaded = true; agent.loading = false; if (getPage() === 'agent') render(); }
+    }
+    async function workSelect(id) {
+      if (agent.busy || agent.current?.id === id) return;
+      agent.error = '';
+      try { const response = demo ? { session: agent.demoSessions.find(s => s.id === id) } : await rpc('work_agent_load', { session_id: id });
+        agent.current = response.session; agent.attachments = agent.attachmentsBySession.get(String(id)) || []; render();
+      } catch (err) { agent.error = errorText(err); render(); }
+    }
+    async function workCreate() {
+      if (agent.busy) return;
+      agent.error = '';
+      try {
+        let session;
+        if (demo) { session = { id: `demo-${Date.now()}`, title: '新的演示任务', messages: [], attachments: [], artifacts: [] }; agent.demoSessions.unshift(session); }
+        else session = (await rpc('work_agent_create')).session;
+        agent.sessions = [session, ...agent.sessions.filter(s => s.id !== session.id)]; agent.current = session; agent.attachments = agent.attachmentsBySession.get(String(session.id)) || []; render();
+      } catch (err) { agent.error = errorText(err); render(); }
+    }
+    async function workAttach() {
+      if (demo) { toast('演示模式不会打开本机文件；附件功能可在桌面连接模式使用。'); return; }
+      if (!agent.current) return;
+      try { const result = await rpc('work_agent_attach', { session_id: agent.current.id });
+        if (result.cancelled) return;
+        const files = result.attachments || []; agent.attachments.push(...files); agent.attachmentsBySession.set(String(agent.current.id), agent.attachments); agent.current.attachments = [...(agent.current.attachments || []), ...files]; render();
+      } catch (err) { toast(errorText(err), 'error'); }
+    }
+    async function workSend(text) {
+      if (!agent.current || agent.busy) return;
+      const sessionId = String(agent.current.id), typed = String(text || '').trim(), originalAttachments = [...agent.attachments], ids = originalAttachments.map(a => a.id);
+      if (!typed && !ids.length) return;
+      const content = typed || '请处理我附加的文件。';
+      agent.drafts.set(sessionId, typed);
+      const localUser = { id: `local-${Date.now()}`, role: 'user', content, attachment_ids: ids, created: new Date().toISOString() };
+      agent.current.messages = [...(agent.current.messages || []), localUser]; agent.attachments = []; agent.attachmentsBySession.set(sessionId, []); agent.busy = true; agent.error = ''; render();
+      try {
+        let response;
+        if (demo) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+          const answer = '这是合成演示回复。演示模式没有调用外部模型，也没有访问本机文件。你可以在设置卡片中体验连接测试与配置界面。';
+          response = { session: { ...agent.current, title: agent.current.title === '新的演示任务' ? content.slice(0, 32) : agent.current.title, messages: [...agent.current.messages, { id: `demo-assistant-${Date.now()}`, role: 'assistant', content: answer, created: new Date().toISOString(), sources: [], trace: [{ tool: 'demo_response', status: 'demo_only' }] }] }, result: { answer, artifacts: [], sources: [], trace: [{ tool: 'demo_response', status: 'demo_only' }], mode: 'demo' } };
+        } else response = await rpc('work_agent_turn', { session_id: sessionId, text: content, attachment_ids: ids });
+        agent.current = response.session;
+        if (response.result?.artifacts?.length && !(agent.current.artifacts || []).length) agent.current.artifacts = response.result.artifacts;
+        if (response.result) { const last = (agent.current.messages || []).at(-1); if (last?.role === 'assistant') { if (!last.sources) last.sources = response.result.sources || []; if (!last.trace) last.trace = response.result.trace || []; } }
+        agent.drafts.delete(sessionId);
+        agent.sessions = [response.session, ...agent.sessions.filter(s => s.id !== response.session.id)]; agent.result = response.result || null;
+      } catch (err) {
+        if (String(agent.current?.id) === sessionId) agent.current.messages = (agent.current.messages || []).filter(message => message.id !== localUser.id);
+        agent.drafts.set(sessionId, typed);
+        agent.attachments = originalAttachments;
+        agent.attachmentsBySession.set(sessionId, agent.attachments);
+        agent.error = errorText(err);
+      }
+      finally { agent.busy = false; render(); }
+    }
+    async function workExport(artifact) {
+      if (demo) { toast('演示模式没有可导出的本机文件。'); return; }
+      try { const res = await rpc('work_agent_export', { session_id: agent.current.id, artifact_id: artifact.id }); if (res.cancelled) return; if (res.success === false) throw new Error(res.message || '保存失败'); toast('文件已保存'); } catch (err) { toast(errorText(err), 'error'); }
+    }
+    async function workDelete() {
+      if (!agent.current || agent.busy) return;
+      const target = agent.current, { dialog, body } = showDialog('删除这个任务？');
+      body.append(el('p', 'dialog-copy', `“${target.title || '未命名任务'}”及其对话和附件记录将被删除。此操作无法撤销。`));
+      const confirm = button('删除任务', 'trash', async () => {
+        try {
+          if (demo) agent.demoSessions = agent.demoSessions.filter(s => s.id !== target.id);
+          else await rpc('work_agent_delete', { session_id: target.id });
+          agent.sessions = agent.sessions.filter(s => s.id !== target.id); agent.drafts.delete(String(target.id)); agent.attachmentsBySession.delete(String(target.id));
+          if (String(agent.current?.id) === String(target.id)) agent.current = null;
+          dialog.close(); render();
+        } catch (err) { toast(errorText(err), 'error'); }
+      }, 'danger');
+      body.append(append(el('div', 'dialog-footer'), button('取消', null, () => dialog.close()), confirm));
+    }
+    async function workSaveConfig(testOnly = false) {
+      if (agent.configBusy) return; agent.configBusy = true; agent.testMessage = '正在测试模型连接…'; render();
+      try {
+        const payload = { work_base_url: agent.config.work_base_url.trim(), work_model: agent.config.work_model.trim() };
+        if (agent.config.work_api_key) payload.work_api_key = agent.config.work_api_key;
+        if (testOnly) { const out = demo ? { success: true, message: '演示测试已通过；没有连接外部服务。' } : await rpc('work_agent_test', { config: payload }); agent.testMessage = out.message || (out.success ? '连接成功' : '连接失败'); }
+        else { await rpc('save_config', { config: payload }); agent.config.work_api_key = ''; agent.testMessage = demo ? '演示设置已更新；合成数据只记录是否设置 Key。' : '工作 Agent 设置已保存'; }
+      } catch (err) { agent.testMessage = errorText(err); }
+      finally { agent.configBusy = false; render(); }
+    }
+    function renderWorkChat() {
+      const saved = getState().config || {};
+      if (!agent.config.work_base_url && saved.work_base_url) agent.config.work_base_url = saved.work_base_url;
+      if (!agent.config.work_model && saved.work_model) agent.config.work_model = saved.work_model;
+      if (!agent.loaded) { if (!agent.loading) workRefresh(); }
+      const root = el('section', 'page work-page');
+      const top = append(el('div', 'work-heading'), append(el('div'), el('span', 'eyebrow', 'WORK AGENT'), el('h1', '', '把任务交给知弦')), el('span', 'work-demo-label', demo ? '演示模式 · 合成回复，不连接模型或本机文件' : '工作空间'));
+      root.append(top);
+      const tabs = el('div', 'work-tabs');
+      for (const [id, label] of [['chat', '工作 Agent'], ['triage', '会话巡检'], ['settings', '模型设置']]) { const b = el('button', `work-tab${agent.tab === id ? ' active' : ''}`, label); b.type = 'button'; b.setAttribute('aria-pressed', String(agent.tab === id)); b.addEventListener('click', () => { agent.tab = id; render(); }); tabs.append(b); } root.append(tabs);
+      if (agent.tab === 'triage') { root.append(renderTriage()); return root; }
+      if (agent.tab === 'settings') {
+        const panel = el('section', 'panel work-settings'); panel.append(el('span', 'eyebrow', '独立模型连接'), el('h2', '', '工作 Agent 模型'), el('p', 'field-hint', '支持 OpenAI 兼容的 Chat Completions 接口。发送任务时，你选择的文字、文件和图片内容会提交给这里配置的模型服务商处理；请先确认其数据处理政策。API Key 只在填写时提交；保存后不会回显。'), el('p', 'work-image-support', '图片支持取决于所选模型是否支持图像输入。'));
+        const grid = el('div', 'work-settings-grid'); grid.append(workInput('API Base URL', 'work_base_url', 'url', 'https://api.example.com/v1'), workInput('模型名称', 'work_model', 'text', 'model-name'), workInput('API Key', 'work_api_key', 'password', '仅在需要更换时填写')); panel.append(grid);
+        const actions = el('div', 'work-settings-actions'); actions.append(button('测试连接', 'pulse', () => workSaveConfig(true), 'subtle', agent.configBusy), button('保存设置', 'check', () => workSaveConfig(false), 'primary', agent.configBusy)); panel.append(actions);
+        if (agent.testMessage) panel.append(el('p', 'work-config-message', agent.testMessage)); root.append(panel); return root;
+      }
+      const layout = el('div', 'work-layout'), sidebar = el('aside', 'panel work-sidebar');
+      sidebar.append(append(el('div', 'work-sidebar-head'), el('h2', '', '任务'), button('新任务', 'plus', workCreate, 'small primary', agent.busy)));
+      const list = el('div', 'work-task-list');
+      for (const item of agent.sessions) { const b = el('button', `work-task${agent.current?.id === item.id ? ' active' : ''}`); b.type = 'button'; b.disabled = agent.busy || agent.current?.id === item.id; b.append(el('strong', '', item.title || '未命名任务'), el('span', '', item.preview || item.messages?.at(-1)?.content || '开始新的对话')); b.addEventListener('click', () => workSelect(item.id)); list.append(b); }
+      if (!agent.sessions.length) list.append(el('p', 'field-hint', '还没有任务。点击「新任务」开始。')); sidebar.append(list);
+      const main = el('section', 'panel work-conversation');
+      if (!agent.current) { const welcome = el('div', 'work-welcome'); welcome.append(el('div', 'work-welcome-mark', '弦'), el('h2', '', '今天想完成什么？'), el('p', '', '写下任务，或附上文件和图片。知弦会在这里整理结果与可保存的产物。'), button('开始新任务', 'plus', workCreate, 'primary')); main.append(welcome); }
+      else {
+        const convoHead = append(el('div', 'work-conversation-head'), append(el('div'), el('span', 'eyebrow', '任务对话'), el('h2', '', agent.current.title || '新任务')), button('删除任务', 'trash', workDelete, 'small ghost', agent.busy)); main.append(convoHead);
+        const timeline = el('div', 'work-timeline'); for (const msg of agent.current.messages || []) timeline.append(workMessage(msg));
+        if (agent.busy) { const status = el('div', 'work-working'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite'); status.append(el('span', 'work-spinner'), el('span', '', '正在处理任务…')); timeline.append(status); }
+        if (!(agent.current.messages || []).length) timeline.append(el('div', 'work-empty-hint', '描述一个任务，知弦会在此处回复。'));
+        main.append(timeline);
+        const artifacts = el('div', 'work-artifacts'); for (const file of agent.current.artifacts || []) { const card = append(el('article', 'work-artifact'), icon('folder', 18), append(el('div'), el('strong', '', file.name), el('span', '', `${file.mime_type || '文件'} · ${file.size || 0} bytes`)), button('保存文件', 'upload', () => workExport(file), 'small subtle')); artifacts.append(card); } if (artifacts.childElementCount) main.append(artifacts);
+        if (agent.error) main.append(notice(agent.error, 'error'));
+        const composer = el('form', 'work-composer'), textarea = el('textarea', 'input'); textarea.rows = 3; textarea.placeholder = '描述你想完成的任务…'; textarea.setAttribute('aria-label', '任务消息'); textarea.disabled = agent.busy;
+        const sessionId = String(agent.current.id); textarea.value = agent.drafts.get(sessionId) || ''; textarea.addEventListener('input', () => agent.drafts.set(sessionId, textarea.value));
+        const pending = el('div', 'work-pending-files'); for (const file of agent.attachments) { const chip = el('span', 'work-file-chip', `${file.kind === 'image' ? '图片' : '文件'} · ${file.name}`); const remove = el('button', 'work-chip-remove', '移除'); remove.type = 'button'; remove.disabled = agent.busy; remove.setAttribute('aria-label', `移除附件 ${file.name}`); remove.addEventListener('click', () => { agent.attachments = agent.attachments.filter(a => a.id !== file.id); agent.attachmentsBySession.set(sessionId, agent.attachments); render(); }); chip.append(remove); pending.append(chip); }
+        const controls = el('div', 'work-composer-controls'); controls.append(button('添加文件或图片', 'plus', workAttach, 'subtle', agent.busy), el('span', 'work-composer-hint', '未输入文字时，发送会请求知弦处理附件 · Enter 发送 · Shift+Enter 换行'), button(agent.busy ? '处理中…' : '发送', 'arrow', () => workSend(textarea.value), 'primary', agent.busy));
+        composer.append(textarea, pending, controls); composer.addEventListener('submit', e => { e.preventDefault(); workSend(textarea.value); }); textarea.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); composer.requestSubmit(); } }); main.append(composer);
+      }
+      layout.append(sidebar, main); root.append(layout); return root;
+    }
+    function renderAgent() { return renderWorkChat(); }
     function agentCard(data) {
       const card = el('article', 'panel agent-card'), selected = agent.selected.find(item => item.session_id === String(data.session_id)) || {};
       const labels = { reply_now: '建议现在回复', follow_up: '稍后跟进', wait: '先观察', no_action: '无需行动', review: '需要你判断' };
