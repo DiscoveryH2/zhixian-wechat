@@ -1,4 +1,6 @@
 import sys
+import json
+import tempfile
 import threading
 import time
 import unittest
@@ -44,6 +46,37 @@ class FakeWechatDB:
 
 
 class WechatDBCaptureTests(unittest.TestCase):
+    def test_db_sender_block_records_safe_reason_without_private_exception(self):
+        with tempfile.TemporaryDirectory() as temp:
+            audit = Path(temp) / 'send-audit.jsonl'
+            service = CaptureService(lambda *_: None, audit_path=audit)
+            task = {'mode': 'send_db', 'title': 'synthetic-target',
+                    'cancelled': threading.Event(), 'done': threading.Event()}
+            service._requests.put(task)
+            with patch.object(service, '_send_db_worker',
+                              side_effect=RuntimeError('微信标题画面未更新，已拒绝发送')):
+                service._drain_requests()
+            self.assertTrue(task['done'].is_set())
+            self.assertIn('微信窗口画面没有及时更新', task['error'])
+            record = json.loads(audit.read_text(encoding='utf-8').strip())
+            self.assertEqual((record['stage'], record['status']), ('blocked', 'frame_stale'))
+            self.assertNotIn('synthetic-target', audit.read_text(encoding='utf-8'))
+
+    def test_static_window_frame_is_refreshed_before_db_send_verification(self):
+        service = CaptureService(lambda *_: None)
+        service._hwnd = 123
+        service._native_title = '微信'
+        now = time.monotonic()
+        with patch.object(service, '_frame', side_effect=[('old', now - 1.2), ('fresh', now)]) as frame, \
+             patch.object(service, '_close_capture') as close, \
+             patch.object(service, '_ensure_capture') as reopen:
+            full, at = service._fresh_db_send_frame(123, '微信')
+        self.assertEqual(full, 'fresh')
+        self.assertEqual(at, now)
+        self.assertEqual(frame.call_count, 2)
+        close.assert_called_once()
+        reopen.assert_called_once()
+
     def test_tray_hidden_window_is_restored_after_sender_check(self):
         class FakeUser32:
             visible = False

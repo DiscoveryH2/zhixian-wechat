@@ -531,6 +531,11 @@ class Controller(QObject):
             self.auto_paused = True
             self._auto_record(sid, 'failed', '已按下发送键，但未能确认送达；已暂停，请检查微信')
             self.auto_detail = '发送结果尚未确认，自动回复已暂停。请检查微信后再启用。'
+        elif isinstance(error, str) and error.startswith('数据库发送核验：'):
+            self.auto_paused = True
+            detail = error.split('：', 1)[1][:160]
+            self._auto_record(sid, 'failed', detail)
+            self.auto_detail = detail + ' 自动回复已暂停。'
         else:
             self.auto_paused = True
             self._auto_record(sid, 'failed', '安全核验或发送失败，已暂停')

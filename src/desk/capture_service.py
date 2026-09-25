@@ -131,6 +131,22 @@ class CaptureService:
             stream.flush()
             os.fsync(stream.fileno())
 
+    @staticmethod
+    def _db_send_failure(exc):
+        """Map private/native exceptions to fixed, content-free diagnostics."""
+        reason = str(exc)
+        if '画面未更新' in reason or '画面已过期' in reason:
+            return 'frame_stale', '微信窗口画面没有及时更新，本次未发送。'
+        if '已有更新' in reason or '最新入站消息已变化' in reason:
+            return 'message_changed', '数据库中已有更新的消息，本次未发送。'
+        if '前台' in reason or '焦点' in reason:
+            return 'focus_unavailable', '微信输入框未能获得焦点，本次未发送。'
+        if '输入框' in reason or '草稿' in reason:
+            return 'composer_unverified', '微信输入框或草稿未通过核验，本次未发送。'
+        if '会话' in reason or '目标窗口' in reason or '同名' in reason:
+            return 'target_unverified', '目标微信会话未通过唯一核验，本次未发送。'
+        return 'verification_failed', '发送前安全核验未通过，本次未发送。'
+
     def _emit(self, kind, payload):
         if self._stop.is_set():
             return
@@ -791,6 +807,22 @@ class CaptureService:
         with self._temporary_db_send_window() as expected_hwnd:
             return self._send_db_visible_worker(task, expected_hwnd)
 
+    def _fresh_db_send_frame(self, expected_hwnd, expected_native):
+        """Restart WGC when a static WeChat window stops publishing frames."""
+        try:
+            full, at = self._frame(wait=1)
+        except RuntimeError:
+            full, at = None, 0.0
+        if full is None or time.monotonic() - at > .75:
+            self._close_capture()
+            self._ensure_capture()
+            if self._hwnd != expected_hwnd or self._native_title != expected_native:
+                raise RuntimeError('微信目标窗口发生变化，已拒绝发送')
+            full, at = self._frame(wait=2)
+        if time.monotonic() - at > 1:
+            raise RuntimeError('微信标题画面未更新，已拒绝发送')
+        return full, at
+
     def _send_db_visible_worker(self, task, expected_hwnd):
         """Use DB for chat state; inspect only WeChat's title and composer."""
         from app.auto_send import send_verified, _assert_target, _press_enter
@@ -838,7 +870,7 @@ class CaptureService:
         def target_frame():
             if task["cancelled"].is_set() or self._stop.is_set() or task["epoch"] != self._control_epoch:
                 raise RuntimeError("数据库发送已取消")
-            full, at = self._frame(wait=2)
+            full, at = self._fresh_db_send_frame(hwnd, native)
             area = chat_area(full)
             if area is None:
                 raise RuntimeError("无法定位微信会话标题与输入框")
@@ -846,7 +878,7 @@ class CaptureService:
             observed = read_title(full[pane:y0, x0:x1])
             if not observed or normalize_title(observed) != normalize_title(title):
                 raise RuntimeError("微信当前会话标题与数据库目标不一致")
-            if time.monotonic() - at > 1 or self._hwnd != hwnd or window_title(hwnd) != native:
+            if self._hwnd != hwnd or window_title(hwnd) != native:
                 raise RuntimeError("微信目标窗口或标题画面已变化")
             self._cap.area = area
             return full, area[:4], at
@@ -922,10 +954,15 @@ class CaptureService:
                 task["result"] = (self._send_db_worker(task) if task.get("mode") == "send_db" else
                                   self._send_worker(task) if task.get('mode') == 'send' else self._fill_worker(task))
             except Exception as exc:
-                task["error"] = str(exc)[:200]
+                if task.get('mode') == 'send_db':
+                    code, detail = self._db_send_failure(exc)
+                    task['error'] = '数据库发送核验：' + detail
+                else:
+                    code = ''
+                    task["error"] = str(exc)[:200]
                 if task.get("mode") in ("send", "send_db"):
                     try:
-                        self._send_audit('blocked', task)
+                        self._send_audit('blocked', task, code)
                     except OSError:
                         pass
             finally:

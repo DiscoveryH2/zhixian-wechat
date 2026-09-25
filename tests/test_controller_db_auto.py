@@ -16,6 +16,19 @@ APP = QApplication.instance() or QApplication([])
 
 
 class ControllerDBAutoTests(unittest.TestCase):
+    def test_safe_database_send_error_is_visible_and_pauses(self):
+        with tempfile.TemporaryDirectory() as temp, patch("desk.capture_service.CaptureService"):
+            ctrl = Controller(Path(temp))
+            try:
+                ctrl.auto_policy['enabled'] = True
+                ctrl._on_auto_sent('synthetic-session', {'epoch': ctrl.auto_epoch},
+                                   '数据库发送核验：微信窗口画面没有及时更新，本次未发送。')
+                self.assertTrue(ctrl.auto_paused)
+                self.assertIn('画面没有及时更新', ctrl.auto_detail)
+                self.assertEqual(ctrl.auto_recent[-1]['status'], 'failed')
+            finally:
+                ctrl.close()
+
     def test_saved_database_allowlist_starts_after_catalog_cache_is_empty(self):
         with tempfile.TemporaryDirectory() as temp, patch("desk.capture_service.CaptureService"):
             ctrl = Controller(Path(temp))

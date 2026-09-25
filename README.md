@@ -6,9 +6,9 @@
 
 A Windows WeChat conversation assistant with read-only local SQLCipher history, optional OCR, Jev judgments, reply drafts, and tightly scoped automatic replies.
 
-**当前版本：1.5.2 预览版** · [下载 v1.5.2 预览版](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.5.2) · [1.5.2 发行说明](docs/releases/1.5.2.md) · [快速开始](#快速开始) · [更新记录](CHANGELOG.md) · [隐私说明](docs/PRIVACY.md)
+**当前版本：1.5.3 预览版** · [下载 v1.5.3 预览版](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.5.3) · [1.5.3 发行说明](docs/releases/1.5.3.md) · [快速开始](#快速开始) · [更新记录](CHANGELOG.md) · [隐私说明](docs/PRIVACY.md)
 
-**1.5.2 预览版** 修复升级到数据库来源后旧 OCR 自动回复名单无法启动的问题；知弦会在唯一匹配时把旧名单迁移到数据库会话 ID，并在重启后重新核验已保存的数据库名单。后台读取和发送范围见[1.5.1 发行说明](docs/releases/1.5.1.md)，本次修复与验收状态见[1.5.2 发行说明](docs/releases/1.5.2.md)。
+**1.5.3 预览版** 修复托盘微信的静止窗口画面在发送核验时过期、导致明明检测到群消息却在发送前失败的问题；自动回复页会显示具体安全核验原因。后台读取和发送范围见[1.5.1 发行说明](docs/releases/1.5.1.md)，本次修复及验收边界见[1.5.3 发行说明](docs/releases/1.5.3.md)。
 
 ## 看看界面
 
@@ -46,7 +46,7 @@ A Windows WeChat conversation assistant with read-only local SQLCipher history, 
 
 目标环境为 **Windows 10 / Windows 11、微信 Windows 4.x**。本机数据库模式需要当前 Windows 用户已有可用的 CipherTalk 账号配置；窗口布局、缩放和微信版本仍会影响可见会话的发送核验。当前不提供 macOS 或 Linux 客户端。
 
-1. 从 [v1.5.2 预览版 Release](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.5.2) 下载 Windows 便携包，**完整解压**后运行 `Zhixian.exe`。便携版包含 Python、SQLCipher 和离线 OCR 运行环境，不需要另装 Python、Node 或安卓手机。
+1. 从 [v1.5.3 预览版 Release](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.5.3) 下载 Windows 便携包，**完整解压**后运行 `Zhixian.exe`。便携版包含 Python、SQLCipher 和离线 OCR 运行环境，不需要另装 Python、Node 或安卓手机。
 2. 在设置中填写下面三项，点击“测试连接”，确认结果后保存。
 3. 若已有 CipherTalk 账号配置，在设置中选择“本机微信数据库”，点击“开始观察”；打开会话目录选择要分析的联系人或群聊。数据库读取可在微信最小化或收至托盘时继续；自动发送仅处理微信原本已打开的目标会话，届时知弦会短暂恢复窗口核验。没有该配置时可继续使用默认 OCR、WeFlow 或导入记录。
 
@@ -77,7 +77,7 @@ A Windows WeChat conversation assistant with read-only local SQLCipher history, 
 - **手动分析**：粘贴文字对话，使用 `我：` / `对方：` 区分发言人。
 - **其他数据源**：已有兼容版 WeFlow 的用户仍可通过本机 HTTP / SSE 读取消息。
 
-Jev 的意图、风险和概率是**基于有限上下文的模型估计**，不代表对方的真实想法，也不保证回复效果。上游 `should_reply_now` 关注下一条回复是否应包含实质内容，不是自动发送或立即发送的指令。自动回复与一次性历史补回复的适用条件、限制和验证状态见[1.5.2 发行说明](docs/releases/1.5.2.md)。
+Jev 的意图、风险和概率是**基于有限上下文的模型估计**，不代表对方的真实想法，也不保证回复效果。上游 `should_reply_now` 关注下一条回复是否应包含实质内容，不是自动发送或立即发送的指令。自动回复与一次性历史补回复的适用条件、限制和验证状态见[1.5.3 发行说明](docs/releases/1.5.3.md)。
 
 ## 数据来源与范围
 
