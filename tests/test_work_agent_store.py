@@ -93,6 +93,35 @@ class WorkAgentStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkAgentStoreError, "scanned PDFs"):
             WorkAgentStore._extract_text(buff.getvalue(), ".pdf")
 
+    def test_pdf_xlsx_and_pptx_extract_real_text(self):
+        from pypdf import PdfWriter
+        from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+        writer = PdfWriter()
+        page = writer.add_blank_page(width=612, height=792)
+        font = DictionaryObject({NameObject('/Type'): NameObject('/Font'),
+            NameObject('/Subtype'): NameObject('/Type1'), NameObject('/BaseFont'): NameObject('/Helvetica')})
+        page[NameObject('/Resources')] = DictionaryObject({NameObject('/Font'):
+            DictionaryObject({NameObject('/F1'): writer._add_object(font)})})
+        stream = DecodedStreamObject()
+        stream.set_data(b'BT /F1 12 Tf 72 720 Td (Synthetic PDF text) Tj ET')
+        page[NameObject('/Contents')] = writer._add_object(stream)
+        pdf = io.BytesIO()
+        writer.write(pdf)
+        self.assertIn('Synthetic PDF text', WorkAgentStore._extract_text(pdf.getvalue(), '.pdf'))
+
+        for suffix, marker, expected, path, xml in (
+            ('.xlsx', 'xl/workbook.xml', 'Sheet cell 42', 'xl/worksheets/sheet1.xml',
+             '<x:sheet xmlns:x="urn:x"><x:t>Sheet cell 42</x:t></x:sheet>'),
+            ('.pptx', 'ppt/presentation.xml', 'Slide title', 'ppt/slides/slide1.xml',
+             '<a:slide xmlns:a="urn:a"><a:t>Slide title</a:t></a:slide>'),
+        ):
+            with self.subTest(suffix=suffix):
+                buffer = io.BytesIO()
+                with zipfile.ZipFile(buffer, 'w') as archive:
+                    archive.writestr(marker, '<root/>')
+                    archive.writestr(path, xml)
+                self.assertIn(expected, WorkAgentStore._extract_text(buffer.getvalue(), suffix))
+
     def test_ids_names_and_artifacts_are_confined(self):
         with self.assertRaises(WorkAgentStoreError):
             self.store.get_session("../manifest.json")
