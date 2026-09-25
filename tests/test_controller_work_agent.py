@@ -1,6 +1,8 @@
 """Synthetic Work Agent controller and persistence boundary checks."""
 import sys
+import json
 import tempfile
+import threading
 import unittest
 from concurrent.futures import Future
 from pathlib import Path
@@ -9,6 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from PySide6.QtWidgets import QApplication
 from desk.controller import Controller
+from desk.bridge import Bridge
 
 
 app = QApplication.instance() or QApplication([])
@@ -85,10 +88,39 @@ class WorkAgentControllerTests(unittest.TestCase):
         self.assertEqual(payload['attachments'], [])
         self.assertNotIn(self.sid, str(payload))
 
+    def test_cancel_stops_uncommitted_turn_and_keeps_session_unchanged(self):
+        started = threading.Event()
+        pending = Future()
+        def submit(kind, payload):
+            self.assertEqual(kind, 'work_turn')
+            started.set()
+            return pending
+        with patch.object(self.ctrl.models, 'submit', side_effect=submit):
+            turn = self.ctrl.handle('work_agent_turn', {'session_id': self.sid,
+                'text': '请处理合成任务', 'attachment_ids': []})
+            self.assertTrue(started.wait(5))
+            self.assertTrue(self.ctrl.handle('work_agent_cancel', {'session_id': self.sid})['success'])
+            pending.set_result({'answer': '迟到的结果', 'artifacts': [], 'sources': [], 'trace': []})
+            with self.assertRaisesRegex(ValueError, '已停止'):
+                turn.result(timeout=10)
+        self.assertEqual(self.ctrl.work_agent.get_session(self.sid)['messages'], [])
+        self.assertFalse(self.ctrl.handle('work_agent_cancel', {'session_id': self.sid})['success'])
+
+    def test_bridge_progress_event_contains_only_session_and_phase(self):
+        bridge = Bridge(self.ctrl)
+        events = []
+        bridge.event.connect(lambda raw: events.append(json.loads(raw)))
+        self.ctrl.workAgentProgress.emit(self.sid, 'reading')
+        self.assertEqual(events[-1], {'type': 'work_agent_progress',
+                                      'data': {'session_id': self.sid, 'phase': 'reading'}})
+
     def test_export_requires_matching_artifact_id(self):
         self.ctrl.work_agent.commit_turn(self.sid, '生成文件', [], {'answer': '完成',
             'artifacts': [{'name': 'safe.txt', 'content': 'synthetic artifact', 'mime_type': 'text/plain'}]})
         artifact = self.ctrl.work_agent.get_session(self.sid)['artifacts'][0]
+        preview = self.ctrl.handle('work_agent_preview', {'session_id': self.sid,
+            'artifact_id': artifact['id']})
+        self.assertEqual(preview, {'name': 'safe.txt', 'text': 'synthetic artifact'})
         target = Path(self.temp.name) / 'exported.txt'
         with patch('desk.controller.QFileDialog.getSaveFileName', return_value=(str(target), '')):
             self.ctrl.handle('work_agent_export', {'session_id': self.sid,
@@ -96,6 +128,8 @@ class WorkAgentControllerTests(unittest.TestCase):
         self.assertEqual(target.read_text(encoding='utf-8'), 'synthetic artifact')
         with self.assertRaises(ValueError):
             self.ctrl.handle('work_agent_export', {'session_id': self.sid, 'artifact_id': 'wrong'})
+        with self.assertRaises(ValueError):
+            self.ctrl.handle('work_agent_preview', {'session_id': self.sid, 'artifact_id': 'wrong'})
 
 
 if __name__ == '__main__':

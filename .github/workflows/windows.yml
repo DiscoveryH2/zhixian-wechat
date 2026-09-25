@@ -76,9 +76,13 @@ jobs:
             const fs = require('fs');
             const path = require('path');
             const versionText = fs.readFileSync('src/desk/version.py', 'utf8');
-            const match = versionText.match(/VERSION\s*=\s*['"](\d+\.\d+\.\d+)['"]/);
+            const match = versionText.match(/VERSION\s*=\s*['"](\d+\.\d+\.\d+(?:-dev)?)['"]/);
             if (!match) throw new Error('Invalid release version');
             const version = match[1];
+            if (version.endsWith('-dev')) {
+              core.info(`Verified development build ${version}; no release is published.`);
+              return;
+            }
             const tag = `v${version}`;
             // Automatic sending remains a preview until a real incoming-message
             // smoke test confirms the current Windows/WeChat composer path.

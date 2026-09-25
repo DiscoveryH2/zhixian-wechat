@@ -379,7 +379,7 @@ html[data-theme="night"] .agent-trace summary { color: #c0d8c7; }
 .work-welcome-mark { width:48px; height:48px; display:grid; place-items:center; margin:0 auto 17px; border-radius:16px; color:#fff; background:var(--work-accent); font:24px Georgia,serif; }
 .work-welcome h2 { color:var(--work-ink); font:600 24px Georgia,serif; margin:0 0 10px; }
 .work-welcome p { font-size:12px; line-height:1.7; margin:0 auto 18px; }
-.work-composer { border:1px solid #dfe5dd; background:#fff; border-radius:12px; padding:10px; box-shadow:0 4px 16px rgba(29,50,39,.045); }
+.work-composer { flex:0 0 auto; border:1px solid #dfe5dd; background:#fff; border-radius:12px; padding:10px; box-shadow:0 4px 16px rgba(29,50,39,.045); }
 .work-composer textarea { width:100%; min-height:72px; resize:vertical; border:0; box-shadow:none; background:transparent; padding:7px; font-size:13px; line-height:1.6; }
 .work-composer textarea:focus { outline:none; }
 .work-composer-controls,.work-settings-actions { display:flex; align-items:center; gap:9px; }
@@ -399,6 +399,7 @@ html[data-theme="night"] .agent-trace summary { color: #c0d8c7; }
 .work-artifact>div { min-width:0; display:flex; flex-direction:column; gap:3px; flex:1; }
 .work-artifact strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; }
 .work-artifact span { color:var(--work-muted); font-size:9px; }
+.work-artifact-preview { max-height:60vh; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; padding:16px; border:1px solid var(--work-line); border-radius:10px; background:var(--scene-card); color:var(--scene-ink); font:12px/1.7 Consolas,monospace; }
 .work-settings { max-width:820px; padding:25px; }
 .work-settings h2 { margin:7px 0; font:600 21px Georgia,serif; }
 .work-settings-grid { display:grid; grid-template-columns:1fr 1fr; gap:15px; margin:20px 0; }
@@ -410,6 +411,8 @@ html[data-theme="night"] .agent-trace summary { color: #c0d8c7; }
 html[data-theme="night"] .work-page { --work-ink:#e4ebe4; --work-muted:#9ba99d; --work-line:rgba(225,237,224,.12); }
 html[data-theme="night"] .work-sidebar,html[data-theme="night"] .work-conversation,html[data-theme="night"] .work-settings { background:rgba(22,30,25,.88); }
 html[data-theme="night"] .work-task:hover,html[data-theme="night"] .work-task.active,html[data-theme="night"] .work-message-user .work-message-content,html[data-theme="night"] .work-file-chip { background:rgba(102,142,112,.12); border-color:rgba(144,184,151,.18); }
+html[data-theme="night"] .work-file-chip { color:#d5e3d7; }
 html[data-theme="night"] .work-composer { background:#1d2821; border-color:rgba(225,237,224,.16); }
 html[data-theme="night"] .work-demo-label { background:rgba(102,142,112,.12); border-color:rgba(144,184,151,.18); color:#b6d2bb; }
-@media(max-width:760px) { .work-page { height:auto; min-height:100%; padding:18px 12px 28px; }.work-layout { grid-template-columns:1fr; min-height:0; }.work-sidebar { max-height:230px; }.work-task-list { display:grid; grid-template-columns:repeat(auto-fit,minmax(155px,1fr)); }.work-conversation { min-height:65vh; }.work-timeline { max-height:48vh; }.work-settings-grid { grid-template-columns:1fr; }.work-field:last-child { grid-column:auto; }.work-demo-label { max-width:45%; text-align:right; font-size:9px; }.work-composer-controls { flex-wrap:wrap; }.work-composer-hint { display:none; } }
+@media(max-width:950px) { .work-page { height:auto; min-height:100%; padding:18px 12px 28px; }.work-layout { grid-template-columns:1fr; min-height:0; }.work-sidebar { max-height:230px; }.work-task-list { display:grid; grid-template-columns:repeat(auto-fit,minmax(155px,1fr)); }.work-conversation { min-height:65vh; }.work-timeline { max-height:48vh; }.work-settings-grid { grid-template-columns:1fr; }.work-field:last-child { grid-column:auto; }.work-demo-label { max-width:45%; text-align:right; font-size:9px; }.work-composer-controls { flex-wrap:wrap; }.work-composer-hint { display:none; } }
+@media(max-width:950px) { .work-conversation { height:max(430px,calc(100dvh - 430px)); min-height:0; }.work-timeline { max-height:none; min-height:0; } }

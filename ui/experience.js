@@ -8,7 +8,7 @@ window.ZhixianExperience = Object.freeze({
     const moments = { items: [], cursor: null, more: false, loaded: false, busy: false, available: false, source: '', detail: '', error: '', friend: null, results: new Map(), running: new Set(), serial: 0 };
     const histories = new Map(), momentMedia = new Map();
     let appearance = { theme: 'night', font_scale: 1, background_url: '' }, introTimer, searchTimer, importBusy = false, catchupSessionId = '', catchupBusy = false;
-    const agent = { selected: [], result: null, busy: false, error: '', progress: '', tab: 'chat', sessions: [], current: null, loading: false, loaded: false, attachments: [], drafts: new Map(), attachmentsBySession: new Map(), config: { work_base_url: '', work_model: '', work_api_key: '' }, configBusy: false, testMessage: '', demoSessions: [] };
+    const agent = { selected: [], result: null, busy: false, error: '', progress: '', phase: 'reading', startedAt: 0, progressTimer: null, cancelRequested: false, tab: 'chat', sessions: [], current: null, loading: false, loaded: false, attachments: [], drafts: new Map(), attachmentsBySession: new Map(), config: { work_base_url: '', work_model: '', work_api_key: '' }, configBusy: false, testMessage: '', demoSessions: [] };
 
     function safeMedia(value) {
       if (typeof value !== 'string' || !value || value.length > 28 * 1024 * 1024) return '';
@@ -287,7 +287,7 @@ window.ZhixianExperience = Object.freeze({
       const content = typed || '请处理我附加的文件。';
       agent.drafts.set(sessionId, typed);
       const localUser = { id: `local-${Date.now()}`, role: 'user', content, attachment_ids: ids, created: new Date().toISOString() };
-      agent.current.messages = [...(agent.current.messages || []), localUser]; agent.attachments = []; agent.attachmentsBySession.set(sessionId, []); agent.busy = true; agent.error = ''; render();
+      agent.current.messages = [...(agent.current.messages || []), localUser]; agent.attachments = []; agent.attachmentsBySession.set(sessionId, []); agent.busy = true; agent.error = ''; agent.phase = 'reading'; agent.startedAt = Date.now(); agent.cancelRequested = false; clearInterval(agent.progressTimer); agent.progressTimer = setInterval(updateWorkProgress, 1000); render();
       try {
         let response;
         if (demo) {
@@ -307,11 +307,39 @@ window.ZhixianExperience = Object.freeze({
         agent.attachmentsBySession.set(sessionId, agent.attachments);
         agent.error = errorText(err);
       }
-      finally { agent.busy = false; render(); }
+      finally { agent.busy = false; clearInterval(agent.progressTimer); agent.progressTimer = null; render(); }
+    }
+    const workPhaseLabels = { reading: '正在读取任务和附件', model: '模型正在处理', saving: '正在保存回复和产物', stopping: '正在停止任务', done: '任务已完成' };
+    function updateWorkProgress() {
+      const elapsed = Math.max(0, Math.floor((Date.now() - agent.startedAt) / 1000));
+      const node = $('.work-working');
+      if (!node) return;
+      const phase = node.querySelector('.work-phase'); if (phase) phase.textContent = workPhaseLabels[agent.phase] || workPhaseLabels.reading;
+      const time = node.querySelector('.work-elapsed'); if (time) time.textContent = `${elapsed} 秒`;
+    }
+    function handleWorkProgress(data) {
+      if (!agent.busy || String(data?.session_id) !== String(agent.current?.id)) return;
+      if (Object.prototype.hasOwnProperty.call(workPhaseLabels, data.phase)) agent.phase = data.phase;
+      updateWorkProgress();
+    }
+    async function workStop() {
+      if (!agent.busy || demo || agent.cancelRequested || !agent.current) return;
+      agent.cancelRequested = true; agent.phase = 'stopping'; updateWorkProgress();
+      try { const outcome = await rpc('work_agent_cancel', { session_id: String(agent.current.id) }); if (outcome?.success === false) throw new Error(outcome.message || '当前任务无法停止。'); }
+      catch (err) { agent.cancelRequested = false; agent.phase = 'model'; updateWorkProgress(); agent.error = errorText(err); render(); }
     }
     async function workExport(artifact) {
       if (demo) { toast('演示模式没有可导出的本机文件。'); return; }
       try { const res = await rpc('work_agent_export', { session_id: agent.current.id, artifact_id: artifact.id }); if (res.cancelled) return; if (res.success === false) throw new Error(res.message || '保存失败'); toast('文件已保存'); } catch (err) { toast(errorText(err), 'error'); }
+    }
+    async function workPreview(artifact) {
+      if (demo) { toast('演示模式没有可预览的本机成果。'); return; }
+      try {
+        const result = await rpc('work_agent_preview', { session_id: agent.current.id, artifact_id: artifact.id });
+        const { dialog, body } = showDialog(result.name || artifact.name || '成果预览');
+        const preview = el('pre', 'work-artifact-preview', result.text || '（空文件）'); preview.tabIndex = 0;
+        body.append(preview, append(el('div', 'dialog-footer'), button('关闭', null, () => dialog.close()), button('保存文件', 'upload', () => workExport(artifact), 'primary')));
+      } catch (err) { toast(errorText(err), 'error'); }
     }
     async function workDelete() {
       if (!agent.current || agent.busy) return;
@@ -346,34 +374,35 @@ window.ZhixianExperience = Object.freeze({
       const root = el('section', 'page work-page');
       const top = append(el('div', 'work-heading'), append(el('div'), el('span', 'eyebrow', 'WORK AGENT'), el('h1', '', '把任务交给知弦')), el('span', 'work-demo-label', demo ? '演示模式 · 合成回复，不连接模型或本机文件' : '工作空间'));
       root.append(top);
-      const tabs = el('div', 'work-tabs');
-      for (const [id, label] of [['chat', '工作 Agent'], ['triage', '会话巡检'], ['settings', '模型设置']]) { const b = el('button', `work-tab${agent.tab === id ? ' active' : ''}`, label); b.type = 'button'; b.setAttribute('aria-pressed', String(agent.tab === id)); b.addEventListener('click', () => { agent.tab = id; render(); }); tabs.append(b); } root.append(tabs);
+      const tabs = el('div', 'work-tabs'); tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', '工作区');
+      const workTabs = [['chat', '工作 Agent'], ['triage', '会话巡检'], ['settings', '模型设置']];
+      for (const [id, label] of workTabs) { const b = el('button', `work-tab${agent.tab === id ? ' active' : ''}`, label); b.type = 'button'; b.id = `work-tab-${id}`; b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', String(agent.tab === id)); b.tabIndex = agent.tab === id ? 0 : -1; b.addEventListener('click', () => { agent.tab = id; render(); }); b.addEventListener('keydown', event => { const order = workTabs.map(item => item[0]); const at = order.indexOf(id); const next = event.key === 'ArrowRight' ? order[(at + 1) % order.length] : event.key === 'ArrowLeft' ? order[(at - 1 + order.length) % order.length] : event.key === 'Home' ? order[0] : event.key === 'End' ? order.at(-1) : null; if (!next) return; event.preventDefault(); agent.tab = next; render(); document.getElementById(`work-tab-${next}`)?.focus(); }); tabs.append(b); } root.append(tabs);
       if (agent.tab === 'triage') { root.append(renderTriage()); return root; }
       if (agent.tab === 'settings') {
         const panel = el('section', 'panel work-settings'); panel.append(el('span', 'eyebrow', '独立模型连接'), el('h2', '', '工作 Agent 模型'), el('p', 'field-hint', '支持 OpenAI 兼容的 Chat Completions 接口。发送任务时，你选择的文字、文件和图片内容会提交给这里配置的模型服务商处理；请先确认其数据处理政策。API Key 只在填写时提交；保存后不会回显。'), el('p', 'work-image-support', '图片支持取决于所选模型是否支持图像输入。'));
         const grid = el('div', 'work-settings-grid'); grid.append(workInput('API Base URL', 'work_base_url', 'url', 'https://api.example.com/v1'), workInput('模型名称', 'work_model', 'text', 'model-name'), workInput('API Key', 'work_api_key', 'password', '仅在需要更换时填写')); panel.append(grid);
         const actions = el('div', 'work-settings-actions'); actions.append(button('测试连接', 'pulse', () => workSaveConfig(true), 'subtle', agent.configBusy), button('保存设置', 'check', () => workSaveConfig(false), 'primary', agent.configBusy)); panel.append(actions);
-        if (agent.testMessage) panel.append(el('p', 'work-config-message', agent.testMessage)); root.append(panel); return root;
+        if (agent.testMessage) { const message = el('p', 'work-config-message', agent.testMessage); message.setAttribute('role', 'status'); message.setAttribute('aria-live', 'polite'); panel.append(message); } root.append(panel); return root;
       }
       const layout = el('div', 'work-layout'), sidebar = el('aside', 'panel work-sidebar');
       sidebar.append(append(el('div', 'work-sidebar-head'), el('h2', '', '任务'), button('新任务', 'plus', workCreate, 'small primary', agent.busy)));
       const list = el('div', 'work-task-list');
-      for (const item of agent.sessions) { const b = el('button', `work-task${agent.current?.id === item.id ? ' active' : ''}`); b.type = 'button'; b.disabled = agent.busy || agent.current?.id === item.id; b.append(el('strong', '', item.title || '未命名任务'), el('span', '', item.preview || item.messages?.at(-1)?.content || '开始新的对话')); b.addEventListener('click', () => workSelect(item.id)); list.append(b); }
+      for (const item of agent.sessions) { const b = el('button', `work-task${agent.current?.id === item.id ? ' active' : ''}`); b.type = 'button'; b.disabled = agent.busy || agent.current?.id === item.id; if (agent.current?.id === item.id) b.setAttribute('aria-current', 'page'); b.append(el('strong', '', item.title || '未命名任务'), el('span', '', item.preview || item.messages?.at(-1)?.content || '开始新的对话')); b.addEventListener('click', () => workSelect(item.id)); list.append(b); }
       if (!agent.sessions.length) list.append(el('p', 'field-hint', '还没有任务。点击「新任务」开始。')); sidebar.append(list);
       const main = el('section', 'panel work-conversation');
       if (!agent.current) { const welcome = el('div', 'work-welcome'); welcome.append(el('div', 'work-welcome-mark', '弦'), el('h2', '', '今天想完成什么？'), el('p', '', '写下任务，或附上文件和图片。知弦会在这里整理结果与可保存的产物。'), button('开始新任务', 'plus', workCreate, 'primary')); main.append(welcome); }
       else {
         const convoHead = append(el('div', 'work-conversation-head'), append(el('div'), el('span', 'eyebrow', '任务对话'), el('h2', '', agent.current.title || '新任务')), button('删除任务', 'trash', workDelete, 'small ghost', agent.busy)); main.append(convoHead);
-        const timeline = el('div', 'work-timeline'); for (const msg of agent.current.messages || []) timeline.append(workMessage(msg));
-        if (agent.busy) { const status = el('div', 'work-working'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite'); status.append(el('span', 'work-spinner'), el('span', '', '正在处理任务…')); timeline.append(status); }
+        const timeline = el('div', 'work-timeline'); timeline.setAttribute('role', 'log'); timeline.setAttribute('aria-live', 'polite'); timeline.setAttribute('aria-relevant', 'additions text'); for (const msg of agent.current.messages || []) timeline.append(workMessage(msg));
+        if (agent.busy) { const status = el('div', 'work-working'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite'); status.append(el('span', 'work-spinner'), el('span', 'work-phase', workPhaseLabels[agent.phase] || workPhaseLabels.reading), el('span', 'work-elapsed', `${Math.floor((Date.now() - agent.startedAt) / 1000)} 秒`)); timeline.append(status); }
         if (!(agent.current.messages || []).length) timeline.append(el('div', 'work-empty-hint', '描述一个任务，知弦会在此处回复。'));
         main.append(timeline);
-        const artifacts = el('div', 'work-artifacts'); for (const file of agent.current.artifacts || []) { const card = append(el('article', 'work-artifact'), icon('folder', 18), append(el('div'), el('strong', '', file.name), el('span', '', `${file.mime_type || '文件'} · ${file.size || 0} bytes`)), button('保存文件', 'upload', () => workExport(file), 'small subtle')); artifacts.append(card); } if (artifacts.childElementCount) main.append(artifacts);
+        const artifacts = el('div', 'work-artifacts'); for (const file of agent.current.artifacts || []) { const card = append(el('article', 'work-artifact'), icon('folder', 18), append(el('div'), el('strong', '', file.name), el('span', '', `${file.mime_type || '文件'} · ${file.size || 0} bytes`)), button('预览', 'eye', () => workPreview(file), 'small ghost'), button('保存文件', 'upload', () => workExport(file), 'small subtle')); artifacts.append(card); } if (artifacts.childElementCount) main.append(artifacts);
         if (agent.error) main.append(notice(agent.error, 'error'));
         const composer = el('form', 'work-composer'), textarea = el('textarea', 'input'); textarea.rows = 3; textarea.placeholder = '描述你想完成的任务…'; textarea.setAttribute('aria-label', '任务消息'); textarea.disabled = agent.busy;
         const sessionId = String(agent.current.id); textarea.value = agent.drafts.get(sessionId) || ''; textarea.addEventListener('input', () => agent.drafts.set(sessionId, textarea.value));
         const pending = el('div', 'work-pending-files'); for (const file of agent.attachments) { const chip = el('span', 'work-file-chip', `${file.kind === 'image' ? '图片' : '文件'} · ${file.name}`); const remove = el('button', 'work-chip-remove', '移除'); remove.type = 'button'; remove.disabled = agent.busy; remove.setAttribute('aria-label', `移除附件 ${file.name}`); remove.addEventListener('click', () => { agent.attachments = agent.attachments.filter(a => a.id !== file.id); agent.attachmentsBySession.set(sessionId, agent.attachments); render(); }); chip.append(remove); pending.append(chip); }
-        const controls = el('div', 'work-composer-controls'); controls.append(button('添加文件或图片', 'plus', workAttach, 'subtle', agent.busy), el('span', 'work-composer-hint', '未输入文字时，发送会请求知弦处理附件 · Enter 发送 · Shift+Enter 换行'), button(agent.busy ? '处理中…' : '发送', 'arrow', () => workSend(textarea.value), 'primary', agent.busy));
+        const controls = el('div', 'work-composer-controls'); controls.append(button('添加文件或图片', 'plus', workAttach, 'subtle', agent.busy), el('span', 'work-composer-hint', '未输入文字时，发送会请求知弦处理附件 · Enter 发送 · Shift+Enter 换行'), agent.busy ? button(agent.cancelRequested ? '正在停止…' : '停止', 'close', workStop, 'subtle', agent.cancelRequested || demo) : button('发送', 'arrow', () => workSend(textarea.value), 'primary'));
         composer.append(textarea, pending, controls); composer.addEventListener('submit', e => { e.preventDefault(); workSend(textarea.value); }); textarea.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); composer.requestSubmit(); } }); main.append(composer);
       }
       layout.append(sidebar, main); root.append(layout); return root;
@@ -796,6 +825,6 @@ window.ZhixianExperience = Object.freeze({
       if (target && !target.disabled && !matchMedia('(prefers-reduced-motion: reduce)').matches) { target.classList.remove('interaction-pulse'); void target.offsetWidth; target.classList.add('interaction-pulse'); setTimeout(() => target.classList.remove('interaction-pulse'), 450); }
     });
     updateState(getState()); startIntro();
-    return { updateState, reconcileSnapshot, renderAppearance, renderMoments, renderAutoReply, renderAgent, openCatalog, messageContent, historyControl, chooseMedia, startIntro };
+    return { updateState, reconcileSnapshot, renderAppearance, renderMoments, renderAutoReply, renderAgent, handleWorkProgress, openCatalog, messageContent, historyControl, chooseMedia, startIntro };
   }
 });

@@ -147,7 +147,7 @@ class WorkAgentTests(unittest.TestCase):
             run_work_turn([{"role": "user", "content": "hi"}], [], self.config, post_json_fn=lambda *a, **k: response(""))
         queue = [response(calls=[call("write_artifact", {"name": "out.txt", "content": "done", "mime_type": "text/plain"})]), response("")]
         result = run_work_turn([{"role": "user", "content": "write"}], [], self.config, post_json_fn=lambda *a, **k: queue.pop(0))
-        self.assertEqual(result["answer"], "")
+        self.assertIn("已生成 1 个成果文件", result["answer"])
         self.assertEqual(len(result["artifacts"]), 1)
 
     def test_non_chat_endpoint_is_rejected(self):
@@ -159,6 +159,80 @@ class WorkAgentTests(unittest.TestCase):
         with self.assertRaises(ProviderError) as caught:
             run_work_turn([{"role": "user", "content": "hi"}], [], self.config, post_json_fn=lambda *a, **k: {"private": "synthetic-test-key"})
         self.assertNotIn("synthetic-test-key", str(caught.exception))
+
+    def test_each_round_fits_context_and_keeps_tool_call_pairs(self):
+        seen = []
+        queue = []
+        for turn in range(4):
+            queue.append(response(calls=[call("read_material", {"id": "large", "offset": 0, "limit": 6000}, f"c{turn}a"),
+                                         call("read_material", {"id": "large", "offset": 1, "limit": 6000}, f"c{turn}b")]))
+        def post(route, payload, timeout):
+            msgs = payload["messages"]
+            size = 0
+            for msg in msgs:
+                content = msg.get("content", "")
+                if isinstance(content, str): size += len(content)
+                elif isinstance(content, list): size += sum(len(x.get("text", "")) for x in content if isinstance(x, dict))
+                for c in msg.get("tool_calls", []): size += len(c.get("function", {}).get("arguments", ""))
+            self.assertLessEqual(size, 20_000)
+            calls = {c["id"] for m in msgs if m.get("role") == "assistant" for c in m.get("tool_calls", [])}
+            replies = [m.get("tool_call_id") for m in msgs if m.get("role") == "tool"]
+            self.assertEqual(len(replies), len(set(replies)))
+            self.assertTrue(set(replies) <= calls)
+            seen.append((size, len(replies)))
+            return queue.pop(0)
+        run_work_turn([{"role": "user", "content": "read all pages"}],
+                      [{"id": "large", "name": "Large", "kind": "text", "text": "x" * 100_000}], self.config, post_json_fn=post)
+        self.assertEqual(len(seen), 4)
+        self.assertTrue(any(reply_count for _, reply_count in seen[1:]))
+
+    def test_large_write_arguments_are_previewed_in_next_request(self):
+        seen = []
+        queue = [response(calls=[call("write_artifact", {"name": "large.txt", "content": "z" * 90_000, "mime_type": "text/plain"})]),
+                 response("created")]
+        def post(route, payload, timeout):
+            seen.append(payload)
+            return queue.pop(0)
+        result = run_work_turn([{"role": "user", "content": "create large file"}], [], self.config, post_json_fn=post)
+        self.assertEqual(len(result["artifacts"][0]["content"]), 90_000)
+        assistant = next(m for m in seen[1]["messages"] if m.get("role") == "assistant")
+        self.assertLess(len(assistant["tool_calls"][0]["function"]["arguments"]), 1200)
+        self.assertLessEqual(sum(len(m.get("content", "")) if isinstance(m.get("content"), str) else 0 for m in seen[1]["messages"]), 20_000)
+
+    def test_write_artifact_uses_utf8_byte_limit(self):
+        boundary = "中" * 33_333 + "a"  # exactly 100,000 UTF-8 bytes
+        queue = [response(calls=[call("write_artifact", {"name": "ok.txt", "content": boundary, "mime_type": "text/plain"})]), response("done")]
+        result = run_work_turn([{"role": "user", "content": "write"}], [], self.config, post_json_fn=lambda *a, **k: queue.pop(0))
+        self.assertEqual(len(result["artifacts"]), 1)
+        too_large = boundary + "a"
+        queue = [response(calls=[call("write_artifact", {"name": "too-large.txt", "content": too_large, "mime_type": "text/plain"})]), response("rejected")]
+        result = run_work_turn([{"role": "user", "content": "write"}], [], self.config, post_json_fn=lambda *a, **k: queue.pop(0))
+        self.assertEqual(result["artifacts"], [])
+        self.assertEqual(result["trace"][0]["status"], "rejected")
+
+    def test_generic_summary_preview_covers_all_eight_documents(self):
+        docs = [{"id": f"doc-{i}", "name": f"file-{i}.txt", "kind": "text", "text": f"unique marker document {i}"} for i in range(8)]
+        seen = {}
+        def post(route, payload, timeout):
+            seen.update(payload)
+            return response("summary")
+        run_work_turn([{"role": "user", "content": "summarize the files"}], docs, self.config, post_json_fn=post)
+        user_content = seen["messages"][-1]["content"]
+        for i in range(8):
+            self.assertIn(f"unique marker document {i}", user_content)
+
+    def test_direct_fallback_gets_previews_for_all_eight_documents(self):
+        docs = [{"id": f"doc-{i}", "name": f"file-{i}.txt", "kind": "text", "text": f"unique marker document {i}"} for i in range(8)]
+        seen = []
+        def post(route, payload, timeout):
+            seen.append(payload)
+            if "tools" in payload:
+                raise ProviderError("HTTP 400: unsupported tools")
+            return response("summary")
+        run_work_turn([{"role": "user", "content": "summarize the files"}], docs, self.config, post_json_fn=post)
+        direct_user = seen[1]["messages"][-1]["content"]
+        for i in range(8):
+            self.assertIn(f"unique marker document {i}", direct_user)
 
 
 if __name__ == "__main__":

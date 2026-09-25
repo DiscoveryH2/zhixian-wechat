@@ -97,6 +97,19 @@ class ModelTasks:
         for process, _, _ in jobs:
             process.join(timeout=.5)
 
+    def cancel(self, future):
+        """Stop one isolated model job without cancelling unrelated requests."""
+        with self.lock:
+            job = self.jobs.get(id(future))
+            if not job:
+                return False
+            process, _, owned = job
+            if not owned.done():
+                owned.cancel()
+            if process.is_alive():
+                process.terminate()
+            return True
+
 
 class HelperTasks:
     def __init__(self):

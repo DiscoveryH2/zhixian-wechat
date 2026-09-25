@@ -43,6 +43,7 @@ class Controller(QObject):
     autoSendFinished = Signal(str, object, object)
     catchUpPrepared = Signal(int, str, str, object, object)
     catchUpSent = Signal(int, str, object, object)
+    workAgentProgress = Signal(str, str)
 
     def __init__(self, directory: Path):
         super().__init__()
@@ -50,6 +51,9 @@ class Controller(QObject):
         self.store = Store(directory)
         self.work_agent = WorkAgentStore(Path(directory) / 'work-agent')
         self.work_agent_busy = set()
+        self.work_agent_jobs = {}
+        self.work_agent_cancelled = set()
+        self.work_agent_phases = {}
         self.work_agent_lock = threading.RLock()
         self.imports = ChatLabImporter(directory)
         self.hub = DataHub(on_update=lambda kind, data: self.dataEvent.emit(kind, data))
@@ -1045,9 +1049,35 @@ class Controller(QObject):
         return {'work_base_url': base, 'work_model': model, 'work_api_key': key, 'timeout': 30}
 
     def _work_turn_task(self, sid, text, attachment_ids, config):
+        self._work_phase(sid, 'reading')
         prepared = self.work_agent.prepare_turn(sid, text, attachment_ids)
-        result = self.models.submit('work_turn', {**prepared, 'config': config}).result(timeout=305)
+        with self.work_agent_lock:
+            if sid in self.work_agent_cancelled:
+                raise ValueError('本轮任务已停止。')
+        model_future = self.models.submit('work_turn', {**prepared, 'config': config})
+        with self.work_agent_lock:
+            self.work_agent_jobs[sid] = model_future
+            cancelled = sid in self.work_agent_cancelled
+        if cancelled:
+            self.models.cancel(model_future)
+        self._work_phase(sid, 'model')
+        try:
+            result = model_future.result(timeout=305)
+        except Exception:
+            with self.work_agent_lock:
+                if sid in self.work_agent_cancelled:
+                    raise ValueError('本轮任务已停止。') from None
+            raise
+        finally:
+            with self.work_agent_lock:
+                self.work_agent_jobs.pop(sid, None)
+        with self.work_agent_lock:
+            if sid in self.work_agent_cancelled:
+                raise ValueError('本轮任务已停止。')
+            self.work_agent_phases[sid] = 'saving'
+        self.workAgentProgress.emit(sid, 'saving')
         session = self.work_agent.commit_turn(sid, text, attachment_ids, result)
+        self._work_phase(sid, 'done')
         latest = (session.get('messages') or [{}])[-1]
         new_ids = set(latest.get('artifact_ids') or [])
         artifacts = [item for item in session.get('artifacts', []) if item.get('id') in new_ids]
@@ -1057,6 +1087,13 @@ class Controller(QObject):
             'trace': result.get('trace') or [], 'mode': result.get('mode') or 'direct',
             'usage': result.get('usage') or {},
         }}
+
+    def _work_phase(self, sid, phase):
+        with self.work_agent_lock:
+            if sid in self.work_agent_cancelled and phase != 'stopping':
+                return
+            self.work_agent_phases[sid] = phase
+        self.workAgentProgress.emit(sid, phase)
 
     def _work_attach_task(self, sid, files):
         return {'attachments': self.work_agent.attach_files(sid, files)}
@@ -1352,8 +1389,24 @@ class Controller(QObject):
             def release(_):
                 with self.work_agent_lock:
                     self.work_agent_busy.discard(sid)
+                    self.work_agent_cancelled.discard(sid)
+                    self.work_agent_jobs.pop(sid, None)
+                    self.work_agent_phases.pop(sid, None)
             future.add_done_callback(release)
             return future
+        if method == 'work_agent_cancel':
+            sid = str(params.get('session_id') or '')
+            with self.work_agent_lock:
+                if sid not in self.work_agent_busy:
+                    return {'success': False, 'message': '这个任务当前没有正在运行的回合。'}
+                if self.work_agent_phases.get(sid) in ('saving', 'done'):
+                    return {'success': False, 'message': '结果已进入保存阶段，无法中途停止。'}
+                self.work_agent_cancelled.add(sid)
+                job = self.work_agent_jobs.get(sid)
+            if job:
+                self.models.cancel(job)
+            self._work_phase(sid, 'stopping')
+            return {'success': True}
         if method == 'work_agent_test':
             return self.pool.submit(self._work_test_task, self._work_model_config(params.get('config')))
         if method == 'work_agent_export':
@@ -1363,6 +1416,18 @@ class Controller(QObject):
             if not target:
                 return {'cancelled': True}
             return self.pool.submit(self._work_export_task, path, Path(target))
+        if method == 'work_agent_preview':
+            sid = str(params.get('session_id') or '')
+            artifact_id = str(params.get('artifact_id') or '')
+            path = self.work_agent.resolve_artifact(sid, artifact_id)
+            artifact = next((a for a in self.work_agent.get_session(sid)['artifacts'] if a['id'] == artifact_id), None)
+            if path.stat().st_size > 100000:
+                raise ValueError('成果文件超过预览大小限制，请导出后查看。')
+            try:
+                content = path.read_text(encoding='utf-8')
+            except (OSError, UnicodeError):
+                raise ValueError('暂时无法预览该成果文件。') from None
+            return {'name': artifact['name'] if artifact else '成果文件', 'text': content[:100000]}
         if method == 'work_agent_delete':
             sid = str(params.get('session_id') or '')
             with self.work_agent_lock:

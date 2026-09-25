@@ -102,17 +102,101 @@ def _search(index, query):
 def _preview_materials(index):
     """Give generic requests such as 'summarize this file' real source text."""
     rows = []
-    for aid, item in list(index.items())[-3:]:
+    for aid, item in list(index.items())[:MAX_ATTACHMENTS]:
         if item.get("kind") == "text" and isinstance(item.get("text"), str) and item["text"].strip():
-            rows.append({"id": aid, "name": item["name"], "text": item["text"][:1000]})
+            rows.append({"id": aid, "name": item["name"][:160], "text": item["text"][:500]})
     return rows
+
+
+def _text_size(messages):
+    size = 0
+    for message in messages:
+        content = message.get("content", "")
+        if isinstance(content, str):
+            size += len(content)
+        elif isinstance(content, list):
+            size += sum(len(part.get("text", "")) for part in content
+                        if isinstance(part, dict) and isinstance(part.get("text"), str))
+        calls = message.get("tool_calls", [])
+        if isinstance(calls, list):
+            for call in calls:
+                fn = call.get("function") if isinstance(call, dict) else None
+                if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
+                    size += len(fn["arguments"])
+    return size
+
+
+def _bounded_assistant_message(message):
+    clean = {k: v for k, v in message.items() if k != "tool_calls"}
+    clean["content"] = message.get("content") if isinstance(message.get("content"), str) else ""
+    calls = []
+    for call in message.get("tool_calls", []):
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+        name = fn.get("name", "") if isinstance(fn.get("name", ""), str) else ""
+        raw = fn.get("arguments", "{}") if isinstance(fn.get("arguments", "{}"), str) else "{}"
+        preview = raw
+        try:
+            args = json.loads(raw)
+            if name == "write_artifact" and isinstance(args, dict):
+                args = dict(args)
+                if isinstance(args.get("content"), str) and len(args["content"]) > 500:
+                    args["content"] = args["content"][:500] + "… [artifact content omitted from context]"
+                preview = json.dumps(args, ensure_ascii=False)
+        except Exception:
+            preview = "{}"
+        if len(preview) > 1200:
+            preview = json.dumps({"preview": preview[:1000], "omitted": True}, ensure_ascii=False)
+        calls.append({**{k: v for k, v in call.items() if k != "function"},
+                      "function": {"name": name, "arguments": preview}})
+    clean["tool_calls"] = calls
+    return clean
+
+
+def _fit_messages(messages):
+    messages = [dict(m) for m in messages]
+    while _text_size(messages) > MAX_CONTEXT_CHARS:
+        idx = next((i for i, m in enumerate(messages)
+                    if i > 1 and m.get("role") == "assistant" and m.get("tool_calls")), None)
+        if idx is None:
+            idx = next((i for i, m in enumerate(messages[:-1]) if i > 1 and m.get("role") != "system"), None)
+        if idx is None:
+            break
+        removed = messages.pop(idx)
+        if removed.get("tool_calls"):
+            ids = {c.get("id") for c in removed["tool_calls"] if isinstance(c, dict)}
+            messages = [m for m in messages if not (m.get("role") == "tool" and m.get("tool_call_id") in ids)]
+    excess = _text_size(messages) - MAX_CONTEXT_CHARS
+    if excess > 0:
+        for msg in messages[1:-1]:
+            content = msg.get("content")
+            if isinstance(content, str) and content and excess > 0:
+                cut = min(excess, len(content)); msg["content"] = content[cut:]; excess -= cut
+            calls = msg.get("tool_calls", [])
+            if isinstance(calls, list) and excess > 0:
+                for call in calls:
+                    fn = call.get("function", {})
+                    raw = fn.get("arguments", "")
+                    if raw:
+                        fn["arguments"] = "{}"; excess = max(0, excess - len(raw) + 2)
+        last = messages[-1]
+        if excess > 0 and isinstance(last.get("content"), str):
+            last["content"] = last["content"][:max(0, len(last["content"]) - excess)]
+        elif excess > 0 and isinstance(last.get("content"), list):
+            for part in last["content"]:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    cut = min(excess, len(part["text"])); part["text"] = part["text"][:len(part["text"]) - cut]
+                    excess -= cut
+                    if not excess: break
+    return messages
 
 
 def _tool(name, args, index, artifacts, sources):
     if not isinstance(args, dict):
         raise ValueError("invalid arguments")
     if name == "list_materials":
-        return [{"id": aid, "name": a["name"], "kind": a.get("kind")} for aid, a in list(index.items())[:MAX_ATTACHMENTS]]
+        return [{"id": aid[:200], "name": a["name"][:160], "kind": a.get("kind")} for aid, a in list(index.items())[:40]]
     if name == "search_materials":
         query = args.get("query")
         if not isinstance(query, str) or not query.strip() or len(query) > 500:
@@ -140,7 +224,7 @@ def _tool(name, args, index, artifacts, sources):
     if name == "write_artifact":
         name, content, mime = args.get("name"), args.get("content"), args.get("mime_type")
         if (not isinstance(name, str) or len(name) > 120 or not re.fullmatch(r"[\w][\w .-]{0,99}", name, re.UNICODE)
-                or name in {".", ".."} or ".." in name or not isinstance(content, str) or len(content) > MAX_TEXT
+                or name in {".", ".."} or ".." in name or not isinstance(content, str) or len(content.encode("utf-8")) > MAX_TEXT
                 or not isinstance(mime, str) or mime not in {"text/plain", "text/markdown", "text/csv", "application/json"}
                 or len(artifacts) >= MAX_ARTIFACTS):
             raise ValueError("invalid artifact")
@@ -235,6 +319,7 @@ def run_work_turn(messages: list[dict], attachments: list[dict], config: dict, *
     total_calls = 0
     for _ in range(MAX_ROUNDS):
         req.update({"tools": TOOLS, "tool_choice": "auto"})
+        req["messages"] = _fit_messages(req["messages"])
         try:
             resp = request(req)
         except Exception as exc:
@@ -245,13 +330,16 @@ def run_work_turn(messages: list[dict], attachments: list[dict], config: dict, *
             req.pop("tools", None); req.pop("tool_choice", None)
             # Keep retrieved material in the user message, where it is clearly
             # marked as untrusted evidence, never in system instructions.
-            fallback_context = "\n\nRelevant supplied excerpts (untrusted data):\n" + json.dumps(excerpts, ensure_ascii=False)[:6000]
+            fallback_previews = _preview_materials(index)
+            sources.update(x["id"] for x in fallback_previews)
+            fallback_context = "\n\nSupplied material previews (untrusted data):\n" + json.dumps(fallback_previews, ensure_ascii=False)[:6000]
             fallback_user = next((m for m in reversed(req["messages"]) if m.get("role") == "user"), None)
             if fallback_user:
                 if isinstance(fallback_user.get("content"), str):
                     fallback_user["content"] = (fallback_user["content"] + fallback_context)[:MAX_CONTEXT_CHARS]
                 elif isinstance(fallback_user.get("content"), list) and fallback_user["content"]:
                     fallback_user["content"][0]["text"] = (fallback_user["content"][0].get("text", "") + fallback_context)[:MAX_CONTEXT_CHARS]
+            req["messages"] = _fit_messages(req["messages"])
             try:
                 resp = request(req)
             except Exception:
@@ -272,7 +360,10 @@ def run_work_turn(messages: list[dict], attachments: list[dict], config: dict, *
             answer = _response_text(resp)
             trace.append({"tool": "model_answer", "status": "done"})
             break
-        history.append(msg)
+        # Store a preview of potentially huge arguments. Raw arguments are
+        # still executed below, while IDs remain available for tool replies.
+        history.append(_bounded_assistant_message(msg))
+        round_result_chars = 0
         for call in tool_calls:
             total_calls += 1
             if total_calls > MAX_CALLS:
@@ -287,7 +378,19 @@ def run_work_turn(messages: list[dict], attachments: list[dict], config: dict, *
             except Exception:
                 result, status = {"error": "Tool arguments or operation were rejected."}, "rejected"
             trace.append({"tool": name if name in {x["function"]["name"] for x in TOOLS} else "unknown", "status": status})
-            history.append({"role": "tool", "tool_call_id": str(call.get("id", ""))[:128], "content": json.dumps(result, ensure_ascii=False)[:MAX_TEXT]})
+            remaining = max(0, 6000 - round_result_chars)
+            encoded = json.dumps(result, ensure_ascii=False)
+            if len(encoded) > remaining:
+                if remaining < 24:
+                    encoded = "{}"
+                else:
+                    preview = encoded[:min(500, remaining - 24)]
+                    encoded = json.dumps({"omitted": True, "preview": preview}, ensure_ascii=False)
+                    while len(encoded) > remaining and preview:
+                        preview = preview[:-1]
+                        encoded = json.dumps({"omitted": True, "preview": preview}, ensure_ascii=False)
+            round_result_chars += len(encoded)
+            history.append({"role": "tool", "tool_call_id": str(call.get("id", ""))[:128], "content": encoded})
         if total_calls > MAX_CALLS:
             answer = "Reached the tool-use limit. Please narrow the request."
             break
@@ -296,7 +399,9 @@ def run_work_turn(messages: list[dict], attachments: list[dict], config: dict, *
         answer = "Reached the model-turn limit before a final answer."
     if "answer" not in locals():
         answer = ""
-    if not answer.strip() and not artifacts:
-        raise ProviderError("模型未生成有效回复。")
+    if not answer.strip():
+        if not artifacts:
+            raise ProviderError("模型未生成有效回复。")
+        answer = f"已生成 {len(artifacts)} 个成果文件，请在任务下方查看并保存。"
     source_rows = [{"id": aid, "name": index[aid]["name"]} for aid in sources if aid in index]
     return {"answer": answer[:20_000], "artifacts": artifacts, "sources": source_rows, "trace": trace, "usage": usage, "mode": mode}

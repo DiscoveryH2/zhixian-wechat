@@ -8,6 +8,7 @@ import multiprocessing
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
@@ -19,12 +20,22 @@ sys.path.insert(0, str(ROOT / 'src'))
 
 
 class MockAPI(BaseHTTPRequestHandler):
+    slow_work = False
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         if self.path.endswith('/chat/completions'):
-            content = ('合成 Work Agent 回答：任务已整理。' if request.get('tools') else
-                       json.dumps(['模拟回应一，明天一起确认。', '模拟回应二，我先核对安排。', '模拟回应三，收到你的建议。']))
-            value = {'choices': [{'message': {'role': 'assistant', 'content': content}}]}
+            if request.get('tools') and type(self).slow_work:
+                time.sleep(5)
+            if request.get('tools') and not type(self).slow_work and not any(m.get('role') == 'tool' for m in request.get('messages', [])):
+                arguments = json.dumps({'name': 'synthetic-plan.md', 'content': '# 合成项目计划\n- 周三确认页面\n- 周五交付原型',
+                                        'mime_type': 'text/markdown'}, ensure_ascii=False)
+                value = {'choices': [{'message': {'role': 'assistant', 'content': None,
+                    'tool_calls': [{'id': 'call-synthetic', 'type': 'function',
+                                    'function': {'name': 'write_artifact', 'arguments': arguments}}]}}]}
+            else:
+                content = ('合成 Work Agent 回答：任务已整理。' if request.get('tools') else
+                           json.dumps(['模拟回应一，明天一起确认。', '模拟回应二，我先核对安排。', '模拟回应三，收到你的建议。']))
+                value = {'choices': [{'message': {'role': 'assistant', 'content': content}}]}
         else:
             answers = {}
             for key, q in request['questions'].items():
@@ -42,7 +53,10 @@ class MockAPI(BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
 
     def log_message(self, *args):
         pass
@@ -155,20 +169,34 @@ def main():
         elif state['phase'] == 12 and dom['work_pending']:
             view.page().runJavaScript("(() => { const f=document.querySelector('.work-composer');f.querySelector('textarea').value='请整理一条合成项目计划';f.requestSubmit(); })()")
             state['phase'] = 13
-        elif state['phase'] == 13 and dom['work_answer']:
+        elif state['phase'] == 13 and dom['work_answer'] and dom['work_artifact']:
             if '合成 Work Agent 回答' not in dom['text']:
                 return fail('Work Agent bridge answer missing')
             sessions = controller.work_agent.list_sessions()
             if len(sessions) != 1 or len(controller.work_agent.get_session(sessions[0]['id'])['attachments']) != 2:
                 return fail('Work Agent selected text/image attachments were not stored')
-            state['success'] = True
+            view.page().runJavaScript("[...document.querySelectorAll('.work-artifact button')].find(b=>b.textContent.includes('预览'))?.click()")
             state['phase'] = 14
+        elif state['phase'] == 14 and dom['artifact_preview']:
+            MockAPI.slow_work = True
+            view.page().runJavaScript("(() => { document.querySelector('#editor .dialog-head button')?.click();const f=document.querySelector('.work-composer');f.querySelector('textarea').value='第二条合成慢任务';f.requestSubmit(); })()")
+            state['phase'] = 15
+        elif state['phase'] == 15 and dom['work_stop']:
+            view.page().runJavaScript("[...document.querySelectorAll('.work-composer button')].find(b=>b.textContent.trim()==='停止')?.click()")
+            state['phase'] = 16
+        elif state['phase'] == 16 and dom['work_retry_ready']:
+            sessions = controller.work_agent.list_sessions()
+            stored = controller.work_agent.get_session(sessions[0]['id']) if len(sessions) == 1 else {}
+            if len(sessions) != 1 or len(stored.get('messages', [])) != 2 or len(stored.get('artifacts', [])) != 1:
+                return fail('Cancelled Work Agent turn changed persisted task history')
+            state['success'] = True
+            state['phase'] = 17
             QTimer.singleShot(400, lambda: (view.grab().save(str(ROOT / 'work/ui-work-agent-bridge-synthetic.png')), app.quit()))
             return
         QTimer.singleShot(100, tick)
 
     def tick():
-        script = "JSON.stringify({onboarding:!!document.querySelector('#onboarding-form'),text:document.body.innerText,agent_page:!!document.querySelector('.agent-page'),work_page:!!document.querySelector('.work-page'),work_composer:!!document.querySelector('.work-composer'),work_pending:document.querySelectorAll('.work-pending-files .work-file-chip').length>=2,work_answer:[...document.querySelectorAll('.work-message-assistant')].some(e=>e.textContent.includes('合成 Work Agent 回答')),catalog_open:!!document.querySelector('#session-catalog[open]'),catalog_row:!!document.querySelector('#session-catalog .catalog-row'),agent_selected:!!document.querySelector('.agent-selected-row'),agent_card:!!document.querySelector('.agent-card'),agent_trace:!!document.querySelector('.agent-trace'),js_error:window.__smokeError||''})"
+        script = "JSON.stringify({onboarding:!!document.querySelector('#onboarding-form'),text:document.body.innerText,agent_page:!!document.querySelector('.agent-page'),work_page:!!document.querySelector('.work-page'),work_composer:!!document.querySelector('.work-composer'),work_pending:document.querySelectorAll('.work-pending-files .work-file-chip').length>=2,work_answer:[...document.querySelectorAll('.work-message-assistant')].some(e=>e.textContent.includes('合成 Work Agent 回答')),work_artifact:!!document.querySelector('.work-artifact'),artifact_preview:!!document.querySelector('#editor[open] .work-artifact-preview')?.textContent.includes('周三确认页面'),work_stop:[...document.querySelectorAll('.work-composer button')].some(b=>b.textContent.trim()==='停止'),work_retry_ready:!!document.querySelector('.work-composer textarea:not(:disabled)')?.value.includes('第二条合成慢任务')&&!document.querySelector('.work-working'),catalog_open:!!document.querySelector('#session-catalog[open]'),catalog_row:!!document.querySelector('#session-catalog .catalog-row'),agent_selected:!!document.querySelector('.agent-selected-row'),agent_card:!!document.querySelector('.agent-card'),agent_trace:!!document.querySelector('.agent-trace'),js_error:window.__smokeError||''})"
         view.page().runJavaScript(script, inspect)
     QTimer.singleShot(300, tick)
     QTimer.singleShot(45000, lambda: fail('UI bridge integration timed out at phase ' + str(state['phase']) + ('; JS: ' + state['last_js_error'] if state.get('last_js_error') else '')))

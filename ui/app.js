@@ -572,7 +572,7 @@
           try { const response = typeof raw === 'string' ? JSON.parse(raw) : raw; const wait = pending.get(String(response.id)); if (!wait) return; clearTimeout(wait.timeout); pending.delete(String(response.id)); response.ok ? wait.resolve(response.data) : wait.reject(new Error(typeof response.error === 'string' ? response.error : response.error?.message || '操作未完成。')); } catch { toast('桌面服务返回的数据无法读取。', 'error'); }
         });
         bridge.event.connect(raw => {
-          try { const event = typeof raw === 'string' ? JSON.parse(raw) : raw; if (event.type === 'state') setState(event.data); if (event.type === 'toast') toast(event.data?.message || '', event.data?.level); } catch { /* Ignore malformed events; never expose their raw content. */ }
+          try { const event = typeof raw === 'string' ? JSON.parse(raw) : raw; if (event.type === 'state') setState(event.data); if (event.type === 'toast') toast(event.data?.message || '', event.data?.level); if (event.type === 'work_agent_progress') experience.handleWorkProgress(event.data); } catch { /* Ignore malformed events; never expose their raw content. */ }
         });
         sync().catch(err => { toast(errorText(err), 'error'); render(true); });
       });

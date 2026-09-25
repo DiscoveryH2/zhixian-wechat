@@ -74,6 +74,19 @@ class ModelProcessTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 2)
         self.assertTrue(future.cancelled())
 
+    def test_cancel_stops_one_work_model_process(self):
+        self.delay = 5
+        future = self.tasks.submit('work_turn', {'messages': [
+            {'role': 'user', 'content': '合成慢任务', 'attachment_ids': []}],
+            'attachments': [], 'config': {
+                'work_base_url': f'http://127.0.0.1:{self.server.server_port}/v1',
+                'work_model': 'synthetic-work', 'work_api_key': ''}})
+        self.assertTrue(self.received.wait(10))
+        started = time.monotonic()
+        self.assertTrue(self.tasks.cancel(future))
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertTrue(future.cancelled())
+
     def test_spawned_backlog_judgment_uses_typed_local_protocol(self):
         now = time.time()
         result = self.tasks.submit('judge_backlog', {'messages': [
