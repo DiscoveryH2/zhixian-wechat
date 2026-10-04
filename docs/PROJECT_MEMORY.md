@@ -13,7 +13,16 @@
 - 参考用户 fork 的 CipherTalk：核对实际机制与许可证，不能把非商业授权代码直接纳入商用项目。
 - macOS、图片/语音、所有会话选择、数据渐进加载、缓存预热、背景/字体设置、3–5 秒开场已有基础，继续完成真实数据链路。
 
-## 已发布基线：v1.7.0
+## 最新已发布：v1.8.0
+
+- 功能与发行提交/tag：`f926a16bda78f283adb0c08c95ef2c894ba17052`；main 随后仅更新工程记忆与验证事实。
+- Release：https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.8.0
+- 原生 CI：https://github.com/DiscoveryH2/zhixian-wechat/actions/runs/37199339303，成功。
+- 332 项：Windows 330 通过/2 跳过；macOS 326/6；Linux 327/5。两端 23 阶段桥接、打包分身进程自检与资产审计通过。
+- Windows/macOS arm64 ZIP 已上传，公开 SHA256 清单与 GitHub 资产 digest 匹配；Mac 仍只有 ad-hoc 签名。
+- 后续目标：独立授权连接器、加密/恢复/撤销、签名、语义检索/记忆刷新、授权声音组件和付费试点，见 COMMERCIAL_PLAN.md。
+
+## 历史基线：v1.7.0
 
 - main/tag 提交：`27203b49a2ccf0a6996b7107e2d2fff4ed1aa7da`。
 - Release：https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.7.0
@@ -28,20 +37,20 @@
 ## 模块导航
 
 - `src/desk/controller.py`：Qt Bridge RPC、源选择、会话/朋友圈/自动回复协调。
-- `src/desk/imports.py`：ChatLab 本地 SQLite 索引；目前缺群成员身份持久化与跨会话证据聚合。
+- `src/desk/imports.py`：ChatLab 本地 SQLite 索引；已持久化成员与媒体解释；跨来源证据聚合在 relationships.py。
 - `src/desk/wechat_db_source.py` / `wechat_sqlcipher.py`：已有密钥的只读 SQLCipher 微信数据库访问。
 - `src/desk/cipher_config.py`：读取用户已安装 CipherTalk 配置中的活动账号和密钥；不是自行取钥或破解哈希。
 - `src/desk/datahub.py` / `weflow.py`：兼容本地 WeFlow 服务的分页和缓存。
 - `src/desk/tasks.py`：模型任务独立 spawn 进程，最多 3 个，180 秒超时；后台 helper tasks。
 - `src/core/client.py`：显式聊天模型路由；独立服务的密钥不得串用。
-- `src/core/moments.py`：朋友圈建议；当前手动帖子仅内存，需持久化/导入。
+- `src/core/moments.py`：朋友圈建议；手动/导入帖子已持久化在关系索引。
 - `ui/app.js` / `experience.js` / `workbench.js`：主界面、开场与外观、动作/搜索中心。
 - `scripts/check_secrets.py`：源码发布边界与秘密扫描；新文件应在公共边界内。
 - `.github/workflows/windows.yml`：双平台测试/构建、当前 main 校验后发布；不能覆盖已发布资产。
 
 ## 活动任务：完整分析与数字分身
 
-当前阶段：1.8.0 实现与本地回归完成；提交后等待 Windows/macOS 原生 CI 与 release 验证。
+当前阶段：1.8.0 已发布并完成原生验证，本轮任务完成。
 
 - 参考仓库 HEAD：`4b6df63eaf0aeeeec794b8f3284bc933a4c54fff`，许可 CC BY-NC-SA。Windows DLL 内存扫描取钥；Mac helper/dylib 断点取钥；不能按用户所述当作替换哈希。未复制参考源码/二进制。
 - 新模块 `src/desk/relationships.py`：联系人账号隔离、全索引统计、时间分层抽样、持久朋友圈、分身/来源记忆/对话/断点索引。
@@ -51,14 +60,16 @@
 - 归档媒体解释已持久化并标识可能误识别；发送者/原文/类型改变时失效。
 - 百万条基准：1000 会话导入 15.436s/检索常见词 P95 380.67ms；单会话统计 2533.29ms、抽样 1945.39ms、创建分身 5330.31ms、检索 10.85ms。仅合成实验。
 - 原生朋友圈只读适配 SnsTimeLine(tid,user_name,content)，只读缓存 XML 文字，无远程媒体下载。
-- 已跑：新增 20 项测试通过；完整 332 项（Linux 327 通过/5 跳过），新上下文/打包自检已通过，最终改动需完成最后检查。合成 Qt 桥接 23 阶段通过，含洞察/创建/分身模型对话/停用记忆清历史。
+- 已跑：新增 22 项测试通过；完整 332 项及两端打包/桥接/发行验证通过。合成 Qt 桥接 23 阶段通过，含洞察/创建/分身模型对话/停用记忆清历史。
 
-待完成：
+本轮完成项：
 1. 已确认参考机制与许可边界。
 2. 已实现稳定账号关联与持久化。
 3. 已实现完整索引统计、抽样洞察与逐字引用验证。
 4. 已实现分身对话、TTS、来源记忆停用/恢复、分身删除；整库检索及并发失效测试已补。
-5. 回归并核实桥接/模型任务/迁移/分页/身份隔离；更新 README、路线、release 并验证原生 CI。
+5. 已更新 README、执行路线与 release，完成迁移/分页/身份隔离及原生回归。
+
+原生首轮发现两个测试夹具未关闭 SQLite 导致 Windows 临时文件锁定；已显式关闭并在上述发行提交验证。工程检查点/验证文档单独维护不会触发重新打包；更新前仍需源码发布扫描。
 
 ## 工作方法与陷阱
 
