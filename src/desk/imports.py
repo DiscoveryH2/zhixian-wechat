@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import mimetypes
 import re
 import sqlite3
@@ -22,6 +23,16 @@ MAX_LINE_BYTES = 2 * 1024 * 1024
 MEDIA_EXT = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.wav', '.mp3', '.m4a', '.ogg', '.opus', '.amr'}
 KINDS = {0: 'text', 1: 'image', 2: 'voice', 3: 'video', 5: 'emoji', 7: 'link', 8: 'location', 27: 'contact', 23: 'call', 80: 'system'}
 LABELS = {'image': '[图片]', 'voice': '[语音]', 'video': '[视频]', 'emoji': '[表情]', 'link': '[链接]', 'location': '[位置]', 'contact': '[名片]', 'call': '[通话]', 'system': '[系统消息]'}
+
+
+def stable_identity(value, label='帐号 ID', maximum=240, allow_empty=False):
+    if value is None and allow_empty:
+        return ''
+    if not isinstance(value, str) or len(value)>maximum or any(ord(c)<32 for c in value):
+        raise ValueError(f'{label} 应为不含控制字符、长度不超过 {maximum} 的字符串。')
+    if not value.strip() and not allow_empty:
+        raise ValueError(f'{label} 不能为空。')
+    return value if value.strip() else ''
 
 
 def _safe_media_path(export_dir: Path, content: str, kind: str) -> str:
@@ -58,6 +69,7 @@ class ChatLabImporter:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         with self._connect() as db:
+            migrate_members = not db.execute("SELECT 1 FROM sqlite_master WHERE name='members'").fetchone()
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -74,7 +86,27 @@ class ChatLabImporter:
                 );
                 CREATE INDEX IF NOT EXISTS messages_page ON messages(session_id,timestamp DESC,id DESC);
                 CREATE INDEX IF NOT EXISTS sessions_updated ON sessions(updated DESC,id);
+                CREATE TABLE IF NOT EXISTS members (
+                  session_id TEXT NOT NULL, platform_id TEXT NOT NULL, name TEXT NOT NULL,
+                  PRIMARY KEY(session_id,platform_id)
+                );
+                CREATE INDEX IF NOT EXISTS messages_author ON messages(sender,session_id,timestamp DESC);
+                CREATE TABLE IF NOT EXISTS message_understanding (
+                  session_id TEXT NOT NULL, message_id TEXT NOT NULL, text TEXT NOT NULL,
+                  kind TEXT NOT NULL, original_text TEXT NOT NULL, sender TEXT NOT NULL,
+                  model TEXT NOT NULL, created REAL NOT NULL,
+                  PRIMARY KEY(session_id,message_id)
+                );
             ''')
+            columns = {row['name'] for row in db.execute('PRAGMA table_info(sessions)')}
+            if 'platform' not in columns:
+                db.execute("ALTER TABLE sessions ADD COLUMN platform TEXT NOT NULL DEFAULT 'wechat'")
+            if 'origin' not in columns:
+                db.execute("ALTER TABLE sessions ADD COLUMN origin TEXT NOT NULL DEFAULT 'chatlab'")
+            if migrate_members:
+                db.execute('''INSERT OR IGNORE INTO members(session_id,platform_id,name)
+                    SELECT DISTINCT session_id,sender,sender FROM messages
+                    WHERE sender IS NOT NULL AND sender NOT IN ('','unknown')''')
 
     @contextmanager
     def _connect(self):
@@ -154,20 +186,28 @@ class ChatLabImporter:
                             raise ValueError('文件不是受支持的 ChatLab 导出格式。')
                         if not isinstance(meta, dict) or not meta.get('name') or meta.get('type') not in ('private', 'group'):
                             raise ValueError('ChatLab 缺少会话名称或类型。')
-                        owner = str(meta.get('ownerId') or '')
+                        owner = stable_identity(meta.get('ownerId') or '', 'ownerId')
                         if not owner:
                             raise ValueError('ChatLab 缺少 ownerId，无法可靠区分你的消息。')
+                        platform = stable_identity(meta.get('platform') or 'wechat', 'platform', 100)
                         if meta['type'] == 'group':
-                            identity = str(meta.get('groupId') or '')
+                            identity = stable_identity(meta.get('groupId') or '', 'groupId')
                             if not identity:
                                 raise ValueError('群聊导出缺少稳定的 groupId。')
                         else:
                             # Include known participant IDs so equal display names remain separate.
-                            ids = sorted(str(m.get('platformId')) for m in header.get('members', []) if isinstance(m, dict) and m.get('platformId') and m.get('platformId') != owner)
+                            ids = sorted(stable_identity(m.get('platformId'), 'platformId') for m in header.get('members', []) if isinstance(m, dict) and m.get('platformId') and m.get('platformId') != owner)
                             if not ids:
                                 raise ValueError('单聊导出缺少稳定的好友帐号 ID，不能仅凭同名昵称合并。')
                             identity = '|'.join(ids)
-                        sid = 'import:' + hashlib.sha256(f"{meta.get('platform', 'wechat')}|{owner}|{identity}".encode()).hexdigest()[:24]
+                        sid = 'import:' + hashlib.sha256(f"{platform}|{owner}|{identity}".encode()).hexdigest()[:24]
+                        for member in header.get('members') or []:
+                            if not isinstance(member, dict) or not member.get('platformId'):
+                                continue
+                            member_id = stable_identity(member['platformId'], 'platformId')
+                            name = str(member.get('accountName') or member.get('groupNickname') or member_id)[:200]
+                            db.execute('''INSERT INTO members VALUES(?,?,?) ON CONFLICT(session_id,platform_id)
+                                DO UPDATE SET name=excluded.name''', (sid, member_id, name))
                         count, latest, latest_kind, updated = 0, '', 'text', 0.0
                         occurrences = {}
                         for raw in messages:
@@ -179,13 +219,13 @@ class ChatLabImporter:
                             except (ValueError, TypeError):
                                 kind_number = -1
                             kind = KINDS.get(kind_number, 'other')
-                            sender = str(raw.get('sender') or '')[:240]
-                            side = 'me' if sender == owner else 'other'
+                            sender = stable_identity(raw.get('sender') or '', 'sender', allow_empty=True)
+                            side = 'me' if sender == owner else 'other' if sender and sender != 'unknown' else 'unknown'
                             try:
                                 timestamp = float(raw.get('timestamp') or 0)
                             except (ValueError, TypeError):
                                 timestamp = 0.0
-                            timestamp = timestamp if 0 < timestamp < 10**13 else 0.0
+                            timestamp = timestamp if math.isfinite(timestamp) and 0 < timestamp < 10**13 else 0.0
                             original_id = str(raw.get('platformMessageId') or '')
                             if not original_id:
                                 signature = hashlib.sha256(f'{sender}|{timestamp}|{kind_number}|{text}'.encode()).hexdigest()
@@ -198,6 +238,9 @@ class ChatLabImporter:
                                 sender=excluded.sender,side=excluded.side,text=excluded.text,kind=excluded.kind,
                                 timestamp=excluded.timestamp,media_rel=excluded.media_rel''',
                                        (sid, message_id, sender, side, text, kind, timestamp, media_rel))
+                            if sender and sender != 'unknown':
+                                db.execute('INSERT OR IGNORE INTO members VALUES(?,?,?)',
+                                           (sid, sender, str(raw.get('accountName') or raw.get('groupNickname') or sender)[:200]))
                             count += 1
                             if progress and count % 3000 == 0:
                                 progress({'files_done': file_index-1, 'files_total': len(files),
@@ -211,6 +254,11 @@ class ChatLabImporter:
                               latest=excluded.latest,latest_kind=excluded.latest_kind,updated=excluded.updated,
                               count=(SELECT COUNT(*) FROM messages WHERE session_id=excluded.id),imported_at=excluded.imported_at''',
                                    (sid, title, identity, meta['type'], str(path.parent.resolve()), latest, latest_kind, updated, count, owner, time.time()))
+                        db.execute('UPDATE sessions SET platform=? WHERE id=?', (platform, sid))
+                        last = db.execute('SELECT text,kind,timestamp FROM messages WHERE session_id=? ORDER BY timestamp DESC,id DESC LIMIT 1', (sid,)).fetchone()
+                        if last:
+                            db.execute('UPDATE sessions SET latest=?,latest_kind=?,updated=? WHERE id=?',
+                                       (last['text'][:140], last['kind'], last['timestamp'], sid))
                         imported.append({'id': sid, 'title': title, 'count': count})
                         total += count
                 if progress:
@@ -285,7 +333,10 @@ class ChatLabImporter:
         limit = min(200, max(1, int(limit)))
         offset = max(0, int(cursor or 0))
         with self.lock, self._connect() as db:
-            rows = db.execute('SELECT * FROM messages WHERE session_id=? ORDER BY timestamp DESC,id DESC LIMIT ? OFFSET ?', (sid, limit+1, offset)).fetchall()
+            rows = db.execute('''SELECT m.*,u.text AS understood_text FROM messages m
+                LEFT JOIN message_understanding u ON u.session_id=m.session_id AND u.message_id=m.id
+                  AND u.original_text=m.text AND u.sender=m.sender AND u.kind=m.kind
+                WHERE m.session_id=? ORDER BY m.timestamp DESC,m.id DESC LIMIT ? OFFSET ?''', (sid, limit+1, offset)).fetchall()
         has_more = len(rows) > limit
         result = [self._message(row) for row in reversed(rows[:limit])]
         return {'items': result, 'next_cursor': str(offset+limit) if has_more else None,
@@ -318,9 +369,22 @@ class ChatLabImporter:
         with self.lock, self._connect() as db:
             return db.execute('SELECT COUNT(*) FROM sessions').fetchone()[0]
 
+    def save_understanding(self, sid, mid, text, kind, model=''):
+        if kind not in ('voice', 'image') or not str(text or '').strip():
+            raise ValueError('媒体识别结果无效。')
+        with self.lock, self._connect() as db:
+            row = db.execute('SELECT * FROM messages WHERE session_id=? AND id=?', (sid, mid)).fetchone()
+            if not row or row['kind'] != kind:
+                raise ValueError('原始媒体消息已改变，识别结果未保存。')
+            db.execute('''INSERT INTO message_understanding VALUES(?,?,?,?,?,?,?,?)
+                ON CONFLICT(session_id,message_id) DO UPDATE SET text=excluded.text,kind=excluded.kind,
+                original_text=excluded.original_text,sender=excluded.sender,model=excluded.model,created=excluded.created''',
+                (sid,mid,str(text).strip()[:16000],kind,row['text'],row['sender'],str(model or '')[:200],time.time()))
+
     @staticmethod
     def _session(row):
         return {'id': row['id'], 'title': row['title'], 'source': 'import', 'talker': row['talker'],
+                'owner_id': row['owner_id'], 'platform': row['platform'], 'origin': row['origin'],
                 'type': row['type'], 'preview': row['latest'] or LABELS.get(row['latest_kind'], ''),
                 'preview_status': row['latest_kind'], 'updated': row['updated'], 'count': row['count'], 'unread_count': 0}
 
@@ -329,5 +393,8 @@ class ChatLabImporter:
         kind = row['kind']
         media = [{'id': 'impasset:' + hashlib.sha256(f"{row['session_id']}|{row['id']}".encode()).hexdigest()[:24],
                   'kind': kind, 'status': 'ready'}] if row['media_rel'] else []
-        return {'id': row['id'], 'side': row['side'], 'sender': row['sender'], 'text': row['text'] or LABELS.get(kind, ''),
+        understood = row['understood_text'] if 'understood_text' in row.keys() else None
+        text = ('[语音转写] ' if kind == 'voice' else '[图片识别] ') + understood if understood else row['text'] or LABELS.get(kind, '')
+        return {'id': row['id'], 'side': row['side'], 'sender': row['sender'], 'text': text,
+                'transcript': understood if kind == 'voice' else None, 'image_description': understood if kind == 'image' else None,
                 'kind': kind, 'timestamp': row['timestamp'], 'source': 'import', 'media': media}

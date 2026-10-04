@@ -3,6 +3,9 @@ name: Desktop checks and release
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'docs/PROJECT_MEMORY.md'
+      - 'docs/VALIDATION-*.md'
   pull_request:
   workflow_dispatch:
 
@@ -60,6 +63,7 @@ jobs:
           node --check ui/app.js
           node --check ui/experience.js
           node --check ui/workbench.js
+          node --check ui/relationships.js
       - name: Test pull requests
         if: github.event_name == 'pull_request'
         shell: bash

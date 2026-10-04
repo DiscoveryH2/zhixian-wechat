@@ -27,6 +27,7 @@ from .version import VERSION
 from .tasks import ModelTasks, HelperTasks
 from .platforms import capabilities
 from .actions import ActionStore
+from .relationships import RelationshipStore
 
 AUTO_DISCLOSURE = '（以上内容为知弦生成）'
 
@@ -50,6 +51,7 @@ class Controller(QObject):
         from .capture_service import CaptureService
         self.store = Store(directory)
         self.imports = ChatLabImporter(directory)
+        self.relationships = RelationshipStore(self.imports)
         self.actions = ActionStore(directory)
         self.speech = None
         self.hub = DataHub(on_update=lambda kind, data: self.dataEvent.emit(kind, data))
@@ -1039,7 +1041,57 @@ class Controller(QObject):
         page = self._session_page_task(config, sid, cursor, limit)
         return page
 
+    def _history_analysis_task(self, cid, sid, config, question):
+        statistics = self.relationships.statistics(cid=cid, sid=sid)
+        corpus = self.relationships.corpus(cid=cid, sid=sid)
+        return self.models.submit('analyze_history', {'statistics': statistics, 'corpus': corpus,
+                                  'config': config, 'question': question}).result(timeout=185)
+
+    def _persona_chat_task(self, pid, text, config):
+        context = self.relationships.chat_context(pid, text)
+        result = self.models.submit('chat_persona', {'context': context, 'config': config}).result(timeout=185)
+        return self.relationships.append_turn(pid, context['revision'], context['message'], result)
+
+    def _sync_analysis_task(self, sid, meta, restart=False):
+        if sid.startswith('import:'):
+            return {'archive_id': sid, 'complete': True, 'indexed': 0}
+        if not meta or meta.get('source') != 'wechat_db':
+            raise ValueError('当前支持 ChatLab 导入或本机微信数据库索引；其它来源请先导出为 ChatLab。')
+        reader = self._wechat_db_reader()
+        owner = reader.self_wxid
+        source_id = f'wechat|{owner}|{sid}'
+        state = None if restart else self.relationships.sync_state(source_id)
+        before = json.loads(state['cursor']) if state and state['cursor'] and not state['complete'] else None
+        total, result = 0, None
+        for _ in range(5):
+            if self.closed:
+                raise RuntimeError('索引已随应用关闭停止。')
+            rows = reader.messages(sid, limit=101, before=before)
+            complete = len(rows) <= 100
+            selected = rows[:100]
+            before = list(selected[-1]['_cursor']) if selected else before
+            result = self.relationships.index_native_page(source_id, meta, owner, selected, before, complete)
+            total += len(selected)
+            if complete:
+                break
+        self.relationships.refresh_contacts()
+        return {**result, 'indexed': total, 'warning': '只读索引当前来源的历史快照；原媒体仍需导出文件。未完成时可继续，断点保存在本机。'}
+
+    def _sync_native_moments(self, cursor):
+        reader = self._wechat_db_reader()
+        page = reader.moments(limit=100, offset=max(0, int(cursor or 0)))
+        for post in page['items']:
+            self.relationships.save_moment(post, owner=reader.self_wxid, origin='wechat_db')
+        return {**page, 'indexed': len(page['items'])}
+
     def _list_moments_task(self, config, sid, cursor, limit):
+        local = self.relationships.moments(sid=sid, cursor=cursor or 0, limit=limit) if not cursor or str(cursor).isdigit() else None
+        if local and local['available']:
+            with self.catalog_lock:
+                for post in local['items']:
+                    self.moment_posts[post['id']] = dict(post)
+            self.dataEvent.emit('moments_meta', {'available': True, 'source': 'local', 'warning': local['warning']})
+            return local
         with self.catalog_lock:
             selected = copy.deepcopy(self.catalog_items.get(sid)) if sid else None
         if sid and not selected:
@@ -1164,7 +1216,12 @@ class Controller(QObject):
         history_warning = ''
         if sid:
             if sid.startswith('import:'):
-                history = self.imports.messages(sid, limit=30).get('items', [])
+                try:
+                    contact_scope = self.relationships.contact_for_session(sid)
+                    history = self.relationships.corpus(cid=contact_scope['id'], maximum=24, include_moments=False)['records']
+                    history_warning = '关系背景为跨时间抽样，包含私聊与共同群聊中的本人发言，未逐条送入模型。'
+                except ValueError:
+                    history = self.imports.messages(sid, limit=30).get('items', [])
             else:
                 history = copy.deepcopy(self.sessions.get(sid, {}).get('messages', [])[-30:])
                 with self.catalog_lock:
@@ -1243,6 +1300,46 @@ class Controller(QObject):
     def handle(self, method, params):
         if self.closed:
             raise RuntimeError('应用正在关闭。')
+        if method == 'list_relationship_contacts':
+            return self.pool.submit(self.relationships.contacts, params.get('query'), params.get('cursor'), params.get('limit', 24))
+        if method == 'contact_for_session':
+            return self.pool.submit(self.relationships.contact_for_session, str(params.get('session_id') or ''))
+        if method in ('history_statistics', 'analyze_history'):
+            cid, sid = params.get('contact_id'), params.get('session_id')
+            if not cid and not sid:
+                raise ValueError('请选择联系人或已索引会话。')
+            if method == 'history_statistics':
+                return self.pool.submit(self.relationships.statistics, cid, sid)
+            return self.pool.submit(self._history_analysis_task, cid, sid, self.store.full_config(), params.get('question', ''))
+        if method == 'sync_analysis_archive':
+            sid = str(params.get('session_id') or '')
+            with self.catalog_lock:
+                meta = copy.deepcopy(self.catalog_items.get(sid) or self.sessions.get(sid))
+            return self.pool.submit(self._sync_analysis_task, sid, meta, params.get('restart') is True)
+        if method == 'sync_native_moments':
+            return self.pool.submit(self._sync_native_moments, params.get('cursor'))
+        if method == 'import_moments':
+            cid = str(params.get('contact_id') or '')
+            contact = self.relationships.contact(cid)
+            files, _ = QFileDialog.getOpenFileNames(None, '选择朋友圈 JSON（id、username、contentDesc、createTime）', '', '朋友圈 JSON (*.json)')
+            if not files:
+                return {'cancelled': True}
+            return self.pool.submit(self.relationships.import_moments, files, contact['owner'], contact['platform'])
+        if method == 'list_personas':
+            return self.pool.submit(self.relationships.personas, params.get('cursor'), params.get('limit', 24))
+        if method == 'create_persona':
+            return self.pool.submit(self.relationships.create_persona, params.get('contact_id'), params.get('name', ''),
+                params.get('mode', 'companion'), params.get('include_groups', True) is True, params.get('include_moments', True) is True)
+        if method == 'get_persona':
+            return self.pool.submit(self.relationships.persona, params.get('id'))
+        if method == 'persona_memories':
+            return self.pool.submit(self.relationships.memories, params.get('id'), params.get('cursor'), params.get('limit', 24))
+        if method == 'set_persona_memory':
+            return self.pool.submit(self.relationships.set_memory, params.get('id'), params.get('memory_id'), params.get('active'))
+        if method == 'delete_persona':
+            return self.pool.submit(self.relationships.delete_persona, params.get('id'))
+        if method == 'chat_persona':
+            return self.pool.submit(self._persona_chat_task, str(params.get('id') or ''), params.get('text'), self.store.full_config())
         if method == 'list_actions':
             return self.pool.submit(self.actions.list, params.get('state', 'open'), params.get('cursor') or 0, params.get('limit', 30))
         if method == 'create_action':
@@ -1338,6 +1435,14 @@ class Controller(QObject):
             item = {'id': 'manual-moment:' + uuid.uuid4().hex, 'author': author, 'username': '',
                     'session_id': sid or None, 'text': content, 'timestamp': time.time(),
                     'media': [], 'source': 'manual'}
+            owner, platform = '', 'wechat'
+            if sid.startswith('import:'):
+                try:
+                    contact = self.relationships.contact_for_session(sid)
+                    item['username'], owner, platform = contact['username'], contact['owner'], contact['platform']
+                except ValueError:
+                    pass
+            item = self.relationships.save_moment(item, owner=owner, platform=platform)
             with self.catalog_lock:
                 self.manual_moments[item['id']] = item
                 self.moment_posts[item['id']] = item
@@ -1349,6 +1454,8 @@ class Controller(QObject):
             ident = str(params.get('moment_id') or '')[:256]
             with self.catalog_lock:
                 post = copy.deepcopy(self.moment_posts.get(ident))
+            if not post:
+                post = self.relationships.get_moment(ident)
             if not post:
                 raise ValueError('这条动态已过期，请刷新后再分析。')
             sid = str(params.get('session_id') or post.get('session_id') or '')[:256]
@@ -1686,6 +1793,11 @@ class Controller(QObject):
     def _on_media_finished(self, sid, mid, result, error):
         if self.closed or error or not result or not result.get('success'):
             return
+        if sid.startswith('import:') and result.get('text'):
+            try:
+                self.imports.save_understanding(sid, mid, result['text'], result.get('kind'), result.get('model'))
+            except ValueError:
+                self.toast.emit('原始媒体消息已改变，识别结果未保存到历史索引。', 'info')
         session = self.sessions.get(sid)
         if not session:
             return

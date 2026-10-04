@@ -548,6 +548,18 @@ window.ZhixianExperience = Object.freeze({
     }
     function renderMoments() {
       const root = el('section', 'page moments-page');
+      const imports = el('div', 'page-heading-actions');
+      imports.append(button('导入朋友圈 JSON', 'upload', () => api.importMoments(async () => { moments.loaded = false; await loadMoments(true); }), 'small', !available() || demo || moments.busy));
+      if (getState().capabilities?.native_database) imports.append(button('索引本机朋友圈文字', 'folder', async () => {
+        let cursor = null, total = 0, unreadable = 0;
+        moments.busy = true; moments.error = ''; render();
+        try {
+          let batch;
+          do { batch = await rpc('sync_native_moments', { cursor }); cursor = batch.next_cursor; total += batch.indexed; unreadable += batch.unreadable || 0; } while (batch.has_more);
+          toast(`已处理 ${total} 条朋友圈文字，${unreadable} 条无法解析。`);
+        } finally { moments.busy = false; moments.loaded = false; await loadMoments(true); }
+      }, 'small', moments.busy));
+      root.append(imports);
       root.append(heading('朋友圈', '在回应近况之前，先斟酌关系与分寸。', 'SOCIAL CONTEXT', [button('手动补充', 'pen', manualMomentDialog, '', !available()), button('刷新动态', 'refresh', () => loadMoments(true), 'subtle', moments.busy || !available())]));
       const grid = el('div', 'moments-layout'), sidebar = el('aside', 'moments-sidebar');
       sidebar.append(append(el('div', 'moment-friend-avatar'), moments.friend ? el('span', '', displayName(moments.friend).slice(0, 1)) : icon('moments', 29)), el('h2', '', moments.friend ? displayName(moments.friend) : '全部动态'), el('p', '', moments.friend ? '仅查看这位好友的可用动态' : '选择一位好友，查看适合怎样互动。'), button('选择好友', 'people', () => openCatalog(async item => { moments.friend = item; moments.loaded = false; await loadMoments(true); }), '', !available()));

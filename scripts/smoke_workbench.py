@@ -26,10 +26,18 @@ def main():
     class ModelStub(BaseHTTPRequestHandler):
         def do_POST(self):
             payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-            inputs = json.loads(payload['messages'][-1]['content'])['messages']
-            message = next(m for m in inputs if m['text'] == '报价待确认')
-            proposal = {'title': '核对报价', 'detail': '合成模型提案', 'evidence': [{'message_id': message['id'], 'quote': message['text']}]}
-            body = json.dumps({'choices': [{'message': {'content': json.dumps({'proposals': [proposal]})}}]}).encode()
+            state = json.loads(payload['messages'][-1]['content'])
+            if 'persona' in state:
+                record = next(r for r in state['records'] if '报价' in r['text'])
+                result = {'reply': '合成模拟回应：我们一起慢慢核对。', 'evidence': [{'id': record['id'], 'quote': record['text']}]}
+            elif 'statistics' in state:
+                record = next(r for r in state['records'] if '报价' in r['text'])
+                result = {'insights': [{'title': '合成历史洞察', 'observation': '报价仍需核对', 'action': '询问需要核对的具体项目', 'evidence': [{'id': record['id'], 'quote': record['text']}]}]}
+            else:
+                message = next(m for m in state['messages'] if m['text'] == '报价待确认')
+                proposal = {'title': '核对报价', 'detail': '合成模型提案', 'evidence': [{'message_id': message['id'], 'quote': message['text']}]}
+                result = {'proposals': [proposal]}
+            body = json.dumps({'choices': [{'message': {'content': json.dumps(result)}}]}).encode()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(body)))
@@ -43,7 +51,7 @@ def main():
     controller.store.config.update(base_url=f'http://127.0.0.1:{server.server_port}', reply_base_url=f'http://127.0.0.1:{server.server_port}', model_name='synthetic-judge', reply_model='synthetic-reply')
     controller.handle('manual_context', {'title': '合成客户', 'text': '我：我先核对报价\n对方：请核对客户方案'})
     payload = {'chatlab': {'version': '0.0.2'}, 'meta': {'name': '合成归档', 'type': 'private', 'ownerId': 'me'},
-               'members': [{'platformId': 'me'}, {'platformId': 'customer'}],
+               'members': [{'platformId': 'me'}, {'platformId': 'customer', 'accountName': '合成归档联系人'}],
                'messages': [{'platformMessageId': str(i), 'sender': 'customer', 'timestamp': 1700000000+i,
                              'type': 0, 'content': '报价待确认' if i == 2 else '合成消息'} for i in range(100)]}
     source = Path(temporary.name) / 'synthetic.json'
@@ -67,7 +75,7 @@ def main():
         app.exit(1)
 
     def execute(script):
-        view.page().runJavaScript(script)
+        view.page().runJavaScript("(() => {" + script + "})()")
 
     def capture_then_execute(filename, script):
         def capture():
@@ -80,6 +88,8 @@ def main():
             return QTimer.singleShot(100, tick)
         dom = json.loads(raw)
         phase = state['phase']
+        if phase >= 13 and dom.get('toast_error'):
+            return fail('UI operation error: ' + dom['toast_error'])
         if phase == 0 and dom['intro'] and not state['intro_observed']:
             state['intro_observed'] = True
             QTimer.singleShot(2800, lambda: view.grab().save(str(screenshots / 'intro.png')))
@@ -134,16 +144,59 @@ def main():
             evidence = controller.actions.list()['items'][0]['evidence']
             if not evidence or evidence[0]['text'] != '报价待确认':
                 return fail('Confirmed proposal lost its original evidence')
+            execute("[...document.querySelectorAll('#navigation button')].find(b=>b.textContent.includes('历史洞察')).click()")
+            state['phase'] = 13
+        elif phase == 13 and dom['insights']:
+            execute("[...document.querySelectorAll('.insights-page button')].find(b=>b.textContent==='选择联系人').click()")
+            state['phase'] = 14
+        elif phase == 14 and dom['identity']:
+            execute("document.querySelector('.identity-choice').click()")
+            state['phase'] = 15
+        elif phase == 15 and dom['statistics']:
+            if '100' not in dom['text']:
+                return fail('History statistics missed older archive records')
+            execute("[...document.querySelectorAll('.insights-page button')].find(b=>b.textContent==='生成可执行洞察').click()")
+            state['phase'] = 16
+        elif phase == 16 and dom['insight_result']:
+            if '报价待确认' not in dom['insight_source']:
+                return fail('Historical insight lost source evidence')
+            execute("document.querySelector('.insight-evidence').open=true")
+            state['phase'] = 17
+            capture_then_execute('insights.png', "[...document.querySelectorAll('#navigation button')].find(b=>b.textContent.includes('数字分身')).click()")
+        elif phase == 17 and dom['persona_create_ready']:
+            execute("[...document.querySelectorAll('.personas-page button')].find(b=>b.textContent==='创建分身').click()")
+            state['phase'] = 18
+        elif phase == 18 and dom['identity']:
+            execute("document.querySelector('.identity-choice').click()")
+            state['phase'] = 19
+        elif phase == 19 and dom['persona_editor']:
+            execute("document.querySelector('#persona-mode').value='memorial';[...document.querySelectorAll('#editor button')].find(b=>b.textContent==='建立来源记忆').click()")
+            state['phase'] = 20
+        elif phase == 20 and dom['persona_message']:
+            execute("const input=document.querySelector('#persona-message');input.value='一起核对报价吧';input.dispatchEvent(new Event('input',{bubbles:true}));[...document.querySelectorAll('.personas-page button')].find(b=>b.textContent==='发送到模拟空间').click()")
+            state['phase'] = 21
+        elif phase == 21 and dom['persona_reply']:
+            if 'AI模拟' not in dom['text'] or '合成模拟回应' not in dom['text']:
+                return fail('Persona response lacks simulation label or reply')
+            state['phase'] = 22
+            capture_then_execute('personas.png', "[...document.querySelectorAll('.personas-page button')].find(b=>b.textContent==='来源记忆').click()")
+        elif phase == 22 and dom['persona_memory']:
+            execute("[...document.querySelectorAll('#editor button')].find(b=>b.textContent==='停用这条记忆').click()")
+            state['phase'] = 23
+        elif phase == 23 and dom['inactive_memory'] and not dom['persona_reply']:
+            twin = controller.relationships.personas()['items'][0]
+            if controller.relationships.persona(twin['id'])['turns']:
+                return fail('Disabled source leaked through simulated history')
             state['success'] = True
             app.quit()
             return
         QTimer.singleShot(100, tick)
 
     def tick():
-        script = "JSON.stringify({text:document.body.innerText,intro:!!document.querySelector('#cinema-intro'),actions:!!document.querySelector('.actions-page'),action_editor:!!document.querySelector('#action-title'),action_card:!!document.querySelector('.actions-page .action-card'),proposal:!!document.querySelector('#editor .action-card'),search_editor:!!document.querySelector('#editor input[type=search]'),search_hit:!!document.querySelector('.search-hit'),highlight:!!document.querySelector('.message-hit'),appearance:!!document.querySelector('.appearance-page'),theme_aurora:!!document.querySelector('.theme-aurora'),background_slider:!!document.querySelector('#background-dim')})"
+        script = "JSON.stringify({text:document.body.innerText,toast_error:document.querySelector('.toast.error')?.textContent||'',intro:!!document.querySelector('#cinema-intro'),actions:!!document.querySelector('.actions-page'),action_editor:!!document.querySelector('#action-title'),action_card:!!document.querySelector('.actions-page .action-card'),proposal:!!document.querySelector('#editor .action-card'),search_editor:!!document.querySelector('#editor input[type=search]'),search_hit:!!document.querySelector('.search-hit'),highlight:!!document.querySelector('.message-hit'),appearance:!!document.querySelector('.appearance-page'),theme_aurora:!!document.querySelector('.theme-aurora'),background_slider:!!document.querySelector('#background-dim'),insights:!!document.querySelector('.insights-page'),identity:!!document.querySelector('#editor[open] .identity-choice'),statistics:!!document.querySelector('.insight-stat'),insight_result:!!document.querySelector('.insight-card'),insight_source:document.querySelector('.insight-evidence')?.textContent||'',personas:!!document.querySelector('.personas-page'),persona_create_ready:[...document.querySelectorAll('.personas-page button')].some(b=>b.textContent==='创建分身'&&!b.disabled),persona_editor:!!document.querySelector('#editor[open] #persona-name'),persona_message:!!document.querySelector('#persona-message'),persona_reply:!!document.querySelector('.persona-reply'),persona_memory:!!document.querySelector('.memory-list .source-memory'),inactive_memory:!!document.querySelector('.memory-inactive')})"
         view.page().runJavaScript(script, inspect)
     QTimer.singleShot(500, tick)
-    QTimer.singleShot(45000, lambda: fail('UI regression timed out at phase ' + str(state['phase'])))
+    QTimer.singleShot(65000, lambda: fail('UI regression timed out at phase ' + str(state['phase'])))
     app.exec()
     controller.close()
     server.shutdown()

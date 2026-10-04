@@ -51,8 +51,8 @@
   const demo = new URLSearchParams(location.search).get('demo') === '1';
   const pending = new Map();
   let bridge = null, counter = 0, page = 'workspace', compact = window.innerWidth <= 640, online = false, search = '', currentState;
-  let renderQueued = false, experience = null, workbench = null, lastWorkspaceKey = null, lastAutoReplyKey = null;
-  const blank = () => ({ config: { base_url: '', model_name: '', has_api_key: false, reply_model: '', reply_base_url: '', has_reply_api_key: false, relationship: '朋友', style: '自然简洁', auto_analyze: true, context_limit: 30, save_history: false, always_on_top: false, source: 'ocr', weflow_url: 'http://127.0.0.1:5031', weflow_has_token: false, debounce_ms: 1800 }, status: { capture: 'idle', analysis: 'idle', detail: '等待开始读取微信', last_error: '', source: 'ocr', connected: false }, auto_reply: { enabled: false, paused: false, status: 'off', detail: '', allowlist: [], group_mode: 'mention_only', debounce_seconds: 4, cooldown_seconds: 45, hourly_limit: 8, daily_limit: 40, sent_hour: 0, sent_day: 0, recent: [] }, sessions: [], current_session: null, analysis: null, notes: [], contacts: [], version: '1.7.0' });
+  let renderQueued = false, experience = null, workbench = null, relationships = null, lastWorkspaceKey = null, lastAutoReplyKey = null;
+  const blank = () => ({ config: { base_url: '', model_name: '', has_api_key: false, reply_model: '', reply_base_url: '', has_reply_api_key: false, relationship: '朋友', style: '自然简洁', auto_analyze: true, context_limit: 30, save_history: false, always_on_top: false, source: 'ocr', weflow_url: 'http://127.0.0.1:5031', weflow_has_token: false, debounce_ms: 1800 }, status: { capture: 'idle', analysis: 'idle', detail: '等待开始读取微信', last_error: '', source: 'ocr', connected: false }, auto_reply: { enabled: false, paused: false, status: 'off', detail: '', allowlist: [], group_mode: 'mention_only', debounce_seconds: 4, cooldown_seconds: 45, hourly_limit: 8, daily_limit: 40, sent_hour: 0, sent_day: 0, recent: [] }, sessions: [], current_session: null, analysis: null, notes: [], contacts: [], version: '1.8.0' });
   currentState = blank();
   const configured = () => currentState.config.has_api_key && currentState.config.base_url && currentState.config.model_name;
   const live = () => ['live', 'searching'].includes(currentState.status.capture);
@@ -72,7 +72,7 @@
     if (!bridge) return Promise.reject(new Error('请通过「启动知弦」桌面入口打开，浏览器预览无法连接微信。'));
     return new Promise((resolve, reject) => {
       const id = String(++counter);
-      const timeout = setTimeout(() => { pending.delete(id); reject(new Error('操作等待超时，请检查模型连接或微信窗口后重试。')); }, method === 'import_chat_records' ? 600000 : method === 'run_agent' ? 210000 : ['analyze', 'test_connection', 'analyze_moment', 'transcribe_voice', 'analyze_image', 'choose_media', 'extract_followups'].includes(method) ? 180000 : 45000);
+      const timeout = setTimeout(() => { pending.delete(id); reject(new Error('操作等待超时，请检查模型连接或微信窗口后重试。')); }, ['import_chat_records', 'import_moments'].includes(method) ? 600000 : ['run_agent', 'analyze_history', 'chat_persona', 'sync_analysis_archive'].includes(method) ? 210000 : ['analyze', 'test_connection', 'analyze_moment', 'transcribe_voice', 'analyze_image', 'choose_media', 'extract_followups'].includes(method) ? 180000 : 45000);
       pending.set(id, { resolve, reject, timeout });
       try { bridge.request(JSON.stringify({ id, method, params })); } catch (err) { clearTimeout(timeout); pending.delete(id); reject(err); }
     });
@@ -125,7 +125,7 @@
   async function toggleCompact() { const enabled = !compact; await rpc('set_compact', { enabled }); compact = enabled; $('#app').classList.toggle('compact', compact); render(true); }
   function renderNavigation() {
     const nav = $('#navigation'); nav.replaceChildren();
-    for (const [id, label, name] of [['workspace', '工作台', 'chat'], ['agent', '知弦 Agent', 'spark'], ['actions', '行动中心', 'check'], ['auto-reply', '自动回复', 'pulse'], ['moments', '朋友圈', 'moments'], ['knowledge', '知识库', 'book'], ['contacts', '联系人', 'people'], ['appearance', '外观', 'palette'], ['settings', '设置', 'settings']]) {
+    for (const [id, label, name] of [['workspace', '工作台', 'chat'], ['insights', '历史洞察', 'pulse'], ['personas', '数字分身', 'heart'], ['agent', '知弦 Agent', 'spark'], ['actions', '行动中心', 'check'], ['auto-reply', '自动回复', 'pulse'], ['moments', '朋友圈', 'moments'], ['knowledge', '知识库', 'book'], ['contacts', '联系人', 'people'], ['appearance', '外观', 'palette'], ['settings', '设置', 'settings']]) {
       if (id === 'auto-reply' && currentState.capabilities?.send === false) continue;
       const b = el('button', `nav-button${page === id ? ' active' : ''}`); b.type = 'button'; b.setAttribute('aria-label', label); b.setAttribute('aria-current', page === id ? 'page' : 'false'); b.title = label;
       append(b, icon(name, 21), el('span', '', label)); b.addEventListener('click', () => go(id)); nav.append(b);
@@ -142,7 +142,7 @@
     chip.className = `status-chip ${autoReplyLabel ? `auto-reply-chip ${autoReply.enabled && !autoReply.paused ? 'running' : autoReply.status === 'emergency' ? 'error' : ''}` : status.analysis === 'running' ? 'running' : status.capture === 'live' ? 'live' : status.capture === 'error' ? 'error' : ''}`;
     $('#footer-status').textContent = status.detail || '本地工作台已就绪';
     $('#footer-meta').textContent = currentState.config.model_name ? `${currentState.config.model_name} · ${sourceLabel(currentState.config.source)}` : 'Jev · 语境与判断';
-    $('#version').textContent = String(currentState.version || '1.7.0');
+    $('#version').textContent = String(currentState.version || '1.8.0');
     $('#demo-label').hidden = !demo;
     $('#mini-expand').hidden = !compact;
     renderNavigation();
@@ -155,6 +155,7 @@
     if (page === 'workspace' && !force && workspaceKey === lastWorkspaceKey) return;
     if (page === 'auto-reply' && !force && autoReplyKey === lastAutoReplyKey) return;
     if (page === 'settings' && !force && $('#config-form')) return;
+    if (['personas', 'insights'].includes(page) && !force && ['persona-message', 'history-question'].includes(document.activeElement?.id)) return;
     if ((page === 'knowledge' || page === 'contacts') && !force && document.activeElement?.id === 'collection-search') return;
     const main = $('#main'); const oldScroll = main.scrollTop;
     const timeline = $('.timeline'); const oldTimeline = timeline ? { top: timeline.scrollTop, end: timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 45, session: timeline.dataset.session } : null;
@@ -166,6 +167,8 @@
     else if (page === 'auto-reply') main.replaceChildren(experience.renderAutoReply());
     else if (page === 'agent') main.replaceChildren(experience.renderAgent());
     else if (page === 'actions') main.replaceChildren(workbench.renderActions());
+    else if (page === 'insights') main.replaceChildren(relationships.renderInsights());
+    else if (page === 'personas') main.replaceChildren(relationships.renderPersonas());
     else if (page === 'moments') main.replaceChildren(experience.renderMoments());
     else main.replaceChildren(collection(page));
     if (page === 'workspace') lastWorkspaceKey = workspaceKey;
@@ -606,8 +609,9 @@
     const next = window.innerWidth <= 640;
     if (next !== compact) { compact = next; $('#app').classList.toggle('compact', compact); render(); }
   });
-  experience = window.ZhixianExperience.mount({ $, el, append, icon, button, iconButton, notice, empty, heading, tag, rpc, action, sync, setState, getState: () => currentState, getPage: () => page, go, render, toast, errorText, formatTime, valueText, available, showDialog, manualDialog, field, demo, confirmFollowup: async sid => { await rpc('select_session', { session_id: sid }); await sync(); workbench.actionDialog(); } });
+  experience = window.ZhixianExperience.mount({ $, el, append, icon, button, iconButton, notice, empty, heading, tag, rpc, action, sync, setState, getState: () => currentState, getPage: () => page, go, render, toast, errorText, formatTime, valueText, available, showDialog, manualDialog, field, demo, importMoments: callback => relationships.importMoments(callback), confirmFollowup: async sid => { await rpc('select_session', { session_id: sid }); await sync(); workbench.actionDialog(); } });
   workbench = window.ZhixianWorkbench.mount({ $, el, append, button, heading, notice, empty, rpc, sync, getState: () => currentState, getPage: () => page, go, render, toast, errorText, showDialog, field, available, demo, openCatalog: (...args) => experience.openCatalog(...args) });
+  relationships = window.ZhixianRelationships.mount({ $, el, append, button, heading, notice, empty, rpc, sync, getState: () => currentState, getPage: () => page, go, render, toast, errorText, showDialog, field, available, demo, openCatalog: (...args) => experience.openCatalog(...args) });
   $('#global-sessions').before(button('检索记录', 'search', () => workbench.openSearch(), 'small'));
   connect();
 })();

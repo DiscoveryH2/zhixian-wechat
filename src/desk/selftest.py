@@ -2,6 +2,7 @@
 import json
 import threading
 import sys
+import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -41,8 +42,14 @@ def run_self_test(report_file):
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 data = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-                answers = {k: {'type': 'noul', 'noul': 1} for k in data['questions']}
-                body = json.dumps({'answers': answers}).encode()
+                if 'questions' in data:
+                    value = {'answers': {k: {'type': 'noul', 'noul': 1} for k in data['questions']}}
+                else:
+                    state = json.loads(data['messages'][-1]['content'])
+                    record = state['records'][0]
+                    result = {'reply': '合成模拟回应', 'evidence': [{'id': record['id'], 'quote': record['text']}]}
+                    value = {'choices': [{'message': {'content': json.dumps(result)}}]}
+                body = json.dumps(value).encode()
                 self.send_response(200)
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
@@ -58,6 +65,27 @@ def run_self_test(report_file):
         if not value['success']:
             raise RuntimeError('Isolated model worker did not complete')
         report['checks'] += ['frozen_model_worker', 'local_typed_http', 'qt_webengine_import']
+        from desk.imports import ChatLabImporter
+        from desk.relationships import RelationshipStore
+        with tempfile.TemporaryDirectory(prefix='zhixian-synthetic-') as temp:
+            directory = Path(temp)
+            source = directory / 'synthetic.json'
+            source.write_text(json.dumps({'chatlab': {'version': '0.0.2'},
+                'meta': {'name': '合成联系人', 'type': 'private', 'ownerId': 'synthetic-self'},
+                'members': [{'platformId': 'synthetic-self'}, {'platformId': 'synthetic-friend'}],
+                'messages': [{'sender': 'synthetic-friend', 'type': 0, 'content': '合成来源记忆', 'timestamp': 1700000000, 'platformMessageId': '1'}]}), encoding='utf-8')
+            archives = ChatLabImporter(directory / 'index')
+            archives.import_files([str(source)])
+            memory = RelationshipStore(archives)
+            persona = memory.create_persona(memory.contacts()['items'][0]['id'])
+            context = memory.chat_context(persona['id'], '合成记忆')
+            chat_config = {**config, 'reply_model': 'synthetic-chat',
+                           'reply_base_url': f'http://127.0.0.1:{server.server_port}/v1'}
+            reply = tasks.submit('chat_persona', {'context': context, 'config': chat_config}).result(timeout=25)
+            memory.append_turn(persona['id'], context['revision'], context['message'], reply)
+            if not memory.persona(persona['id'])['turns'] or not reply['simulation']:
+                raise RuntimeError('Source-backed synthetic persona failed')
+            report['checks'] += ['relationship_schema', 'frozen_persona_worker', 'source_citations', 'durable_persona_turn']
         report['success'] = True
     except Exception as exc:
         report['error'] = str(exc)[:1000]

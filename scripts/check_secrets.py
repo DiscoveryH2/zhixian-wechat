@@ -42,7 +42,7 @@ PUBLIC_ROOT_FILES = frozenset({
     ".gitignore", ".gitattributes", ".editorconfig", "README.md", "LICENSE", "LICENSE.md", "LICENSE.txt",
     "NOTICE", "NOTICE.md", "THIRD_PARTY_NOTICES.md", "CONTRACT.md", "SECURITY.md", "CONTRIBUTING.md",
     "CHANGELOG.md", "requirements.txt", "requirements-lock.txt", "pyproject.toml", "setup.cfg",
-    "Zhixian.spec", "启动知弦.cmd",
+    "Zhixian.spec", "启动知弦.cmd", "AGENTS.md",
 })
 PRIVATE_DIRS = frozenset({"data", "work", "outputs", ".venv", "venv", ".git", "__pycache__", ".pytest_cache",
                           ".mypy_cache", ".ruff_cache", ".idea", ".vscode", "node_modules", "build", "dist"})
@@ -52,6 +52,9 @@ TEXT_SUFFIXES = frozenset({".py", ".md", ".txt", ".json", ".jsonl", ".yaml", ".y
 MAX_BYTES = 8 * 1024 * 1024
 MAX_REVIEWED_ASSET_BYTES = 32 * 1024 * 1024
 REVIEWED_ASSETS = {
+    "docs/images/personas.png": "530007d1efee924d9fa6083e3c345c33f7e22d4361ed826261b2112942cd1288",
+    "docs/images/insights.png": "abb019fe3f0a5cf5b950a77f5d32387fb9a77029854e063bfd570a5c620ddf1b",
+
     "ui/icon.ico": "5b9f0f1223d1d560ab3348f0cc5a47fc19e4d51b80c1ba9a7e9ee866c4c293f0",
     "ui/icon.png": "9c15e704220a0cf215a0ea5e0135cd4d81f32e6f25fe2f3e62cb2bb9de255486",
     "ui/fonts/NotoSansSC-Variable.ttf": "a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da",

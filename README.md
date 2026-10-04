@@ -1,20 +1,31 @@
 # 知弦 PC
 
-**读懂眼前的对话，想好再回复。**
+**从完整记录理解沟通，让记忆与建议都有来处。**
 
 知弦是面向 Windows 与 macOS 的开源客户沟通工作台：可从本机微信数据库、当前窗口、导入记录或已连接的 WeFlow 取得上下文，用 Jev 分析可能的意图、需求与回应风险，再生成候选回复。通常由你检查、修改和发送；也可单独启用受白名单、会话核验和限额约束的自动回复。
 
 A Windows and macOS customer communication assistant with read-only local SQLCipher history, optional OCR, Jev judgments, reply drafts, and tightly scoped automatic replies.
 
-**当前版本：1.7.0 跨平台预览版** · [下载 v1.7.0 预览版](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.7.0) · [1.7.0 发行说明](docs/releases/1.7.0.md) · [快速开始](#快速开始) · [更新记录](CHANGELOG.md) · [隐私说明](docs/PRIVACY.md)
+**当前版本：1.8.0 历史洞察与数字分身预览版** · [下载 v1.8.0 预览版](https://github.com/DiscoveryH2/zhixian-wechat/releases/tag/v1.8.0) · [1.8.0 发行说明](docs/releases/1.8.0.md) · [快速开始](#快速开始) · [更新记录](CHANGELOG.md) · [隐私说明](docs/PRIVACY.md)
 
 **1.6.0 预览版** 新增「知弦 Agent」会话巡检：明确选择至多三个会话后，按需查看近期对话、判断当前动作并展示可核对的消息证据和工具步骤。Agent 不会发送微信消息；已有自动回复功能继续单独受白名单、发送核验和限额约束。背景与验证边界见[1.6.0 发行说明](docs/releases/1.6.0.md)。
 
 **1.7.0 预览版** 增加 macOS 工作台、客户行动中心、带原文证据的承诺扫描、中文归档检索与旧消息定位。新增极光配色与约 4.4 秒开场镜头、背景遮罩和动效开关，补齐 OpenAI 兼容语音转写与本机朗读。面向销售、客服与客户成功的后续工作见[商业化执行计划](docs/COMMERCIAL_PLAN.md)与[回归及性能记录](docs/VALIDATION-1.7.md)；当前尚未完成团队权限、加密聊天库、签名发行与商业授权服务，不能宣称为企业级正式版。
 
+**1.8.0 预览版** 新增完整已索引历史统计、群聊与联系人洞察、稳定帐号关联、持久朋友圈和数字分身。分身结合此人的私聊、共同群本人发言、朋友圈建立来源记忆，支持陪伴／纪念／排练、按问题检索全索引原文、本机朗读与记忆停用。每次模型上下文受限，生成回复明确标为模拟，不回写真实记忆。归档图片/语音解释也可参与分析。详见[数据与分身说明](docs/DATA_AND_PERSONAS.md)、[1.8 回归记录](docs/VALIDATION-1.8.md)与[持久项目记忆](docs/PROJECT_MEMORY.md)。
+
 **平台范围：** Windows 保留现有本机数据库和窗口来源；macOS 支持导入、分析、媒体和朋友圈建议，原生微信全库读取与发送仍需专门适配。Mac 使用钥匙串保存 Key，安装与源码运行见[macOS 指南](docs/MACOS.md)。全局会话覆盖已导入或已连接来源，无法读取尚未授权或未取得的数据。
 
 ## 看看界面
+
+### 历史洞察与数字分身
+
+群聊或联系人可以查看完整已索引统计，再核对模型洞察。分身对话明确标为模拟，来源记忆可停用和定位原文。下面均为合成记录和本机模型 stub 的桌面界面。
+
+![合成联系人完整索引统计](docs/images/insights.png)
+
+![合成纪念分身与来源依据入口](docs/images/personas.png)
+
 
 ### 四秒开场与对话工作台
 

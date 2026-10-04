@@ -450,19 +450,72 @@ class WeChatDBSource:
                  "source": "wechat_db", "historical": True}
                 for row in self.sessions(limit=limit, offset=offset)]
 
+    def moments(self, limit=100, offset=0):
+        """Read cached timeline text without fetching media or mutating WeChat."""
+        import xml.etree.ElementTree as ET
+        limit, offset = min(200, max(1, int(limit))), max(0, int(offset))
+        path = next((p for p in (self.root / 'sns' / 'sns.db', self.root / 'sns.db') if p.is_file()), None)
+        if path is None:
+            raise WeChatDBError('当前数据库目录没有可读取的朋友圈缓存；可导入朋友圈 JSON。')
+        try:
+            with closing(self._connect(path)) as con:
+                table = next((name for name in self._tables(con) if name.lower() == 'snstimeline'), None)
+                if not table or not {'tid', 'user_name', 'content'}.issubset(self._columns(con, table)):
+                    raise WeChatDBError('朋友圈缓存结构尚未支持；可导出为 JSON 导入。')
+                rows = con.execute(f'SELECT tid,user_name,content FROM {_quote_identifier(table)} ORDER BY tid DESC LIMIT ? OFFSET ?', (limit+1, offset)).fetchall()
+            names = self._contact_map([_as_text(r[1], 240) for r in rows[:limit]])
+            posts, unreadable = [], 0
+            for row in rows[:limit]:
+                raw = row[2]
+                if not isinstance(raw, (str, bytes)) or len(raw)>1024*1024:
+                    unreadable += 1
+                    continue
+                if isinstance(raw, bytes):
+                    try:
+                        raw = raw.decode('utf-8', 'strict')
+                    except UnicodeDecodeError:
+                        unreadable += 1
+                        continue
+                if '<!DOCTYPE' in raw.upper() or '<!ENTITY' in raw.upper():
+                    unreadable += 1
+                    continue
+                try:
+                    root = ET.fromstring(raw)
+                    text = (root.findtext('.//contentDesc') or '')[:16000]
+                    timestamp = _safe_int(root.findtext('.//createTime'))
+                except (ET.ParseError, ValueError):
+                    unreadable += 1
+                    continue
+                username = _as_text(row[1], 240)
+                if not username:
+                    unreadable += 1
+                    continue
+                posts.append({'id': str(row[0]), 'username': username,
+                    'author': names.get(username, {}).get('name', username),
+                    'text': text, 'timestamp': timestamp, 'media': [], 'source': 'wechat_db'})
+            return {'items': posts, 'has_more': len(rows)>limit,
+                    'next_cursor': offset+limit if len(rows)>limit else None,
+                    'unreadable': unreadable, 'scope': 'cached_sns_text',
+                    'warning': '仅读取本机缓存文字；未缓存或未知结构的朋友圈和配图不包含在内。'}
+        except WeChatDBError:
+            raise
+        except Exception:
+            raise WeChatDBError('无法只读访问朋友圈缓存；可使用 JSON 导入。') from None
+
     def messages(self, session_id: str, limit: int = 100,
-                 before: tuple[int, int, int] | None = None) -> list[dict[str, Any]]:
+                 before: tuple[int, int, int, str] | tuple[int, int, int] | None = None) -> list[dict[str, Any]]:
         """Read latest messages for a session, newest first, with stable cursor.
 
-        ``before`` is the exclusive ``(sort_seq, create_time, local_id)`` cursor
+        ``before`` is the exclusive ``(sort_seq, create_time, local_id, shard)`` cursor
         from the last returned message. Result rows include ``_cursor`` for paging.
         """
         if not isinstance(session_id, str) or not session_id or len(session_id) > 300:
             raise WeChatDBError("会话标识无效")
         limit = max(1, min(int(limit), self.max_limit))
         candidates = [item for item in self._session_tables() if item["session_id"] == session_id]
-        rows: list[tuple[tuple[int, int, int], dict[str, Any]]] = []
+        rows: list[tuple[tuple[int, int, int, str], dict[str, Any]]] = []
         for item in candidates:
+            shard = item['db'].name + '|' + item['table']
             cols = item["columns"]
             sort_col = "sort_seq" if "sort_seq" in cols else "create_time"
             fields = ["local_id", "create_time", "local_type", "message_content"]
@@ -476,15 +529,22 @@ class WeChatDBSource:
             if send_col:
                 fields.append(send_col)
             where = ""
-            params: tuple[int, ...] = (limit + 1,)
+            params: tuple[Any, ...] = (limit + 1,)
             if before is not None:
-                sort_value, stamp_value, local_value = tuple(map(int, before))
+                if len(before) not in (3, 4):
+                    raise WeChatDBError('消息分页游标无效')
+                sort_value, stamp_value, local_value = tuple(map(int, before[:3]))
                 sort_ident = _quote_identifier(sort_col)
                 time_ident = _quote_identifier("create_time")
                 id_ident = _quote_identifier("local_id")
-                where = (f"WHERE ({sort_ident} < ? OR ({sort_ident} = ? AND {time_ident} < ?) "
-                         f"OR ({sort_ident} = ? AND {time_ident} = ? AND {id_ident} < ?)) ")
-                params = (sort_value, sort_value, stamp_value, sort_value, stamp_value, local_value, limit + 1)
+                predicate = (f"{sort_ident} < ? OR ({sort_ident} = ? AND {time_ident} < ?) "
+                             f"OR ({sort_ident} = ? AND {time_ident} = ? AND {id_ident} < ?)")
+                params = (sort_value, sort_value, stamp_value, sort_value, stamp_value, local_value)
+                if len(before) == 4:
+                    predicate += f' OR ({sort_ident}=? AND {time_ident}=? AND {id_ident}=? AND ? < ?)'
+                    params += (sort_value, stamp_value, local_value, shard, str(before[3]))
+                params += (limit + 1,)
+                where = 'WHERE (' + predicate + ') '
             sql = (f"SELECT {', '.join(_quote_identifier(c) for c in fields)} "
                    f"FROM {_quote_identifier(item['table'])} {where}"
                    f"ORDER BY {_quote_identifier(sort_col)} DESC, {_quote_identifier('create_time')} DESC, "
@@ -497,7 +557,7 @@ class WeChatDBSource:
                         local_id = _safe_int(raw["local_id"])
                         stamp = _safe_int(raw["create_time"])
                         sort_seq = _safe_int(raw["sort_seq"]) if "sort_seq" in cols else stamp
-                        cursor = (sort_seq, stamp, local_id)
+                        cursor = (sort_seq, stamp, local_id, shard)
                         sender_id = item["name2id"].get(_safe_int(raw["real_sender_id"]), "") if "real_sender_id" in cols else ""
                         kind, text = _kind(raw["local_type"], raw["message_content"],
                                            raw.get("compress_content"))

@@ -148,6 +148,22 @@ class WeChatDBSourceTests(unittest.TestCase):
         self.assertEqual(len(second), 1)
         self.assertEqual(second[0]["text"], "你好")
 
+    def test_equal_sort_time_and_local_id_across_shards_does_not_drop_next_page(self):
+        _create_shard(self.snapshot, 4, {'wxid_friend': [(10, 901, 999, 9999, 1, 2, '合成分片甲', 0)]})
+        _create_shard(self.snapshot, 5, {'wxid_friend': [(10, 902, 999, 9999, 1, 2, '合成分片乙', 0)]})
+        reader = WeChatDBSource(self.snapshot)
+        expected = reader.messages('wxid_friend', limit=100)
+        found, cursor = [], None
+        while True:
+            page = reader.messages('wxid_friend', limit=1, before=cursor)
+            if not page:
+                break
+            found.extend(page)
+            cursor = page[-1]['_cursor']
+        self.assertEqual([row['id'] for row in found], [row['id'] for row in expected])
+        self.assertEqual(found[0]['text'], '合成分片乙')
+        self.assertEqual(found[1]['text'], '合成分片甲')
+
     def test_database_is_query_only_and_session_id_is_not_sql(self):
         source = WeChatDBSource(self.snapshot)
         self.assertEqual(source.messages("wxid_friend'; DROP TABLE Name2Id;--"), [])

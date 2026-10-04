@@ -60,10 +60,32 @@ def main():
         catalog_ms = (time.perf_counter() - start) * 1000
         assert catalog['total'] == args.sessions and len(catalog['items']) <= 20
         assert (catalog['items'][0]['count'] - args.messages // args.sessions) in (0, 1)
+        from desk.relationships import RelationshipStore
+        memory = RelationshipStore(archive)
+        sid = catalog['items'][0]['id']
+        started = time.perf_counter()
+        stats = memory.statistics(sid=sid)
+        stats_ms = (time.perf_counter()-started)*1000
+        started = time.perf_counter()
+        sample = memory.corpus(sid=sid)
+        sample_ms = (time.perf_counter()-started)*1000
+        assert stats['messages'] == catalog['items'][0]['count']
+        assert sample['sampled_messages'] <= 180
+        contact = memory.contact_for_session(sid)
+        started = time.perf_counter()
+        persona = memory.create_persona(contact['id'])
+        create_ms = (time.perf_counter()-started)*1000
+        started = time.perf_counter()
+        context = memory.chat_context(persona['id'], '报价待确认')
+        retrieve_ms = (time.perf_counter()-started)*1000
+        assert len(context['records']) <= 24 and any('报价待确认' in record['text'] for record in context['records'])
         print(json.dumps({'messages': args.messages, 'sessions': catalog['total'],
                           'import_seconds': round(imported, 3), 'prewarm_seconds': round(warmed, 3),
                           'queries': timings, 'catalog_first_page_ms': round(catalog_ms, 2),
                           'returned_page_limit': 20, 'context_verified': True,
+                          'analysis': {'statistics_ms': round(stats_ms,2), 'temporal_sample_ms': round(sample_ms,2),
+                                       'persona_create_ms': round(create_ms,2), 'persona_retrieve_ms': round(retrieve_ms,2),
+                                       'sampled_records': sample['sampled_messages'], 'model_context_records':len(context['records'])},
                           'scope': 'Synthetic local SQLite; no external model or real WeChat.'}, ensure_ascii=False))
 
 

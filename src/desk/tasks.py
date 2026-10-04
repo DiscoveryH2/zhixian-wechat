@@ -29,6 +29,12 @@ def _model_job(pipe, kind, payload):
         elif kind == 'extract_followups':
             from core.followups import extract_followups
             result = extract_followups(**payload)
+        elif kind == 'analyze_history':
+            from core.relationships import analyze_history
+            result = analyze_history(**payload)
+        elif kind == 'chat_persona':
+            from core.relationships import chat_persona
+            result = chat_persona(**payload)
         else:
             raise ValueError('未识别的模型任务。')
         pipe.send((True, result))
