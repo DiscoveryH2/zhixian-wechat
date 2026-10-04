@@ -247,8 +247,10 @@ class MediaTests(unittest.TestCase):
         result = media.transcribe_audio(audio_bytes(), "audio/wav", config)
         self.assertEqual(result["code"], "wrong_media_endpoint")
         native_openai = dict(CONFIG, stt_model="whisper-1", stt_base_url="https://api.openai.com/v1")
-        result = media.transcribe_audio(audio_bytes(), "audio/wav", native_openai)
-        self.assertEqual(result["code"], "transcription_protocol")
+        with self.assertRaises(ProviderError):
+            media._resolve_route(native_openai, 'audio')
+        route = media._resolve_route(dict(native_openai, stt_api_key='separate-test-key'), 'audio')
+        self.assertEqual(route.mode, 'multipart')
 
     def test_plain_chat_completion_is_not_a_transcription(self):
         self.transport()

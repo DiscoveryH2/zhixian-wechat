@@ -13,7 +13,8 @@ import uuid
 from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QFileDialog
 
 from .store import Store, _atomic, _load, normalize_title
@@ -24,6 +25,8 @@ from .wechat_db_source import WeChatDBSource
 from .wechat_sqlcipher import discover_cipher_source
 from .version import VERSION
 from .tasks import ModelTasks, HelperTasks
+from .platforms import capabilities
+from .actions import ActionStore
 
 AUTO_DISCLOSURE = '（以上内容为知弦生成）'
 
@@ -47,6 +50,8 @@ class Controller(QObject):
         from .capture_service import CaptureService
         self.store = Store(directory)
         self.imports = ChatLabImporter(directory)
+        self.actions = ActionStore(directory)
+        self.speech = None
         self.hub = DataHub(on_update=lambda kind, data: self.dataEvent.emit(kind, data))
         self.capture = CaptureService(lambda k, p: self.captureEvent.emit(k, p),
                                       Path(directory) / 'send-audit.jsonl')
@@ -131,7 +136,8 @@ class Controller(QObject):
 
     def _appearance(self):
         return {'theme': self.store.config['theme'], 'font_scale': self.store.config['font_scale'],
-                'background_url': self.background_url}
+                'background_url': self.background_url,
+                **{k: self.store.config[k] for k in ('motion', 'intro_enabled', 'background_dim')}}
 
     @staticmethod
     def _auto_policy_from(value):
@@ -997,6 +1003,8 @@ class Controller(QObject):
                 if not page.get('available') and not page.get('items'):
                     raise ValueError('所选会话当前不可读取，请检查数据来源后重试。')
                 session = {**known, 'messages': page.get('items') or []}
+                if not page.get('available') and source == 'weflow':
+                    session['freshness'] = 'unavailable'
                 # A fresh source page can replace an in-memory transcript or
                 # image description added by an explicit user media action.
                 understood = {str(item.get('id')): item for item in known.get('messages', [])
@@ -1013,16 +1021,17 @@ class Controller(QObject):
                     'id': str(raw.get('id') or '')[:128],
                     'side': raw.get('side') if raw.get('side') in ('me', 'other') else 'unknown',
                     'sender': str(raw.get('sender') or '')[:80],
-                    'kind': raw.get('kind') if raw.get('kind') in ('text', 'image', 'voice') else 'text' if isinstance(raw.get('text'), str) and raw['text'].strip() else 'unknown',
+                    'kind': raw.get('kind') or 'text',
                     'text': str(raw.get('text') or '')[:1200],
                     'timestamp': raw.get('timestamp') if isinstance(raw.get('timestamp'), (int, float, str)) else None,
                     'directed_to_me': raw.get('directed_to_me') is True,
                 })
             sessions.append({
                 'id': sid, 'title': str(session.get('title') or '未命名会话')[:200],
-                'type': session.get('type') if session.get('type') in ('private', 'group') else 'unknown',
+                'type': session.get('type') if session.get('type') in ('private', 'group') else 'private' if source == 'manual' else 'unknown',
                 'source': str(session.get('source') or '')[:30],
                 'messages': messages,
+                'freshness': session.get('freshness', 'snapshot'),
             })
         return self.models.submit('run_agent', {'sessions': sessions, 'config': model_config}).result(timeout=185)
 
@@ -1152,19 +1161,29 @@ class Controller(QObject):
 
     def _analyze_moment_task(self, cfg, post, sid):
         history = []
+        history_warning = ''
         if sid:
             if sid.startswith('import:'):
                 history = self.imports.messages(sid, limit=30).get('items', [])
             else:
                 history = copy.deepcopy(self.sessions.get(sid, {}).get('messages', [])[-30:])
-                if not history and sid.startswith('weflow:'):
-                    history = self.hub.messages({**cfg, 'source': 'weflow'}, sid, limit=30).get('items', [])
+                with self.catalog_lock:
+                    source = (self.catalog_items.get(sid) or self.sessions.get(sid) or {}).get('source')
+                if source in ('wechat_db', 'weflow') or (not history and sid.startswith('weflow:')):
+                    try:
+                        page = self._session_page_task({**cfg, 'source': source or 'weflow'}, sid, None, 30)
+                        history = page.get('items') or []
+                        if not page.get('available'):
+                            history_warning = '好友近期记录暂不可读取；分析仅使用可用历史快照。'
+                    except Exception:
+                        history = []
+                        history_warning = '好友聊天背景暂不可读取；建议仅基于本条动态。'
         contact = next((entry for entry in self.store.contacts if post.get('author') in [entry['name'], *entry['aliases']]), None)
         relationship = contact.get('relationship') if contact else cfg.get('relationship', '朋友')
         details = {'id': post['id'], 'text': post.get('text', ''), 'author': post.get('author', ''),
                    'image_descriptions': post.get('image_descriptions', [])}
         image_assets = [item for item in post.get('media', []) if item.get('id') and item.get('kind') == 'image']
-        media_warning = ''
+        media_warning = history_warning
         if image_assets and not details['image_descriptions']:
             # The explicit Analyze action may use the first available picture.
             resolved = self._media_bytes(cfg, sid or '', '', image_assets[0]['id'])
@@ -1174,11 +1193,11 @@ class Controller(QObject):
                 if seen.get('success') and seen.get('text'):
                     details['image_descriptions'] = [seen['text']]
                     if len(image_assets) > 1:
-                        media_warning = '只识别了第一张可用配图，其余配图未用于判断。'
+                        media_warning += ' 只识别了第一张可用配图，其余配图未用于判断。'
                 else:
-                    media_warning = seen.get('warning') or '配图暂时无法识别，以下仅依据文字判断。'
+                    media_warning += ' ' + (seen.get('warning') or '配图暂时无法识别，以下仅依据文字判断。')
             else:
-                media_warning = resolved.get('reason', '配图未能读取，以下仅依据文字判断。')
+                media_warning += ' ' + resolved.get('reason', '配图未能读取，以下仅依据文字判断。')
         if not details['text'] and not details['image_descriptions']:
             return {'available': False, 'message': '这条动态只有未能识别的配图，请先提供可用图片。'}
         result = self.models.submit('analyze_moment', {'post': details, 'relationship': relationship or '朋友',
@@ -1210,7 +1229,7 @@ class Controller(QObject):
                 'notes': copy.deepcopy(self.store.notes), 'contacts': copy.deepcopy(self.store.contacts),
                  'catalog': copy.deepcopy(self.catalog), 'moments': copy.deepcopy(self.moments),
                  'appearance': self._appearance(), 'auto_reply': self._auto_public(),
-                'version': VERSION}
+                'version': VERSION, 'capabilities': capabilities()}
 
     def emit(self):
         if not self.closed:
@@ -1222,6 +1241,50 @@ class Controller(QObject):
         return hashlib.sha256(raw.encode()).hexdigest()
 
     def handle(self, method, params):
+        if self.closed:
+            raise RuntimeError('应用正在关闭。')
+        if method == 'list_actions':
+            return self.pool.submit(self.actions.list, params.get('state', 'open'), params.get('cursor') or 0, params.get('limit', 30))
+        if method == 'create_action':
+            sid = str(params.get('session_id') or '')
+            session = copy.deepcopy(self.sessions.get(sid))
+            if not session:
+                raise ValueError('请先打开需要跟进的会话。')
+            return self.pool.submit(self.actions.create, params.get('action') or {}, session)
+        if method == 'extract_followups':
+            session = copy.deepcopy(self.sessions.get(str(params.get('session_id') or '')))
+            if not session:
+                raise ValueError('请先选择客户会话。')
+            cfg = self.store.full_config()
+            cfg = {k: cfg[k] for k in ('base_url', 'model_name', 'api_key', 'reply_model', 'reply_base_url', 'reply_api_key', 'style')}
+            return self.models.submit('extract_followups', {'messages': session.get('messages') or [], 'config': cfg})
+        if method == 'update_action':
+            return self.pool.submit(self.actions.transition, params.get('id'), params.get('state'), params.get('revision'))
+        if method == 'search_messages':
+            return self.pool.submit(self.imports.search, params.get('query'), params.get('cursor') or 0, params.get('limit', 20))
+        if method == 'select_search_result':
+            sid, mid = str(params.get('session_id') or ''), str(params.get('message_id') or '')
+            self.current_id = sid
+            self.follow_live = False
+            def load():
+                meta = self.imports.get_session(sid)
+                if not meta:
+                    raise ValueError('导入会话不存在，请重新检索。')
+                page = self.imports.context(sid, mid)
+                return {'session': {**meta, 'messages': page['items'], 'next_cursor': page['next_cursor'],
+                                    'has_more': page['has_more'], 'highlight_message_id': mid}, 'page': page}
+            future = self.pool.submit(load)
+            future.add_done_callback(lambda done: self._emit_session_done(sid, 'select', done))
+            return future
+        if method == 'speak_text':
+            if self.speech is None:
+                from .speech import Speech
+                self.speech = Speech()
+            return self.speech.say(params.get('text'))
+        if method == 'stop_speech':
+            if self.speech:
+                self.speech.stop()
+            return {'success': True}
         if method == 'bootstrap':
             return self.snapshot()
         if method == 'configure_auto_reply':
@@ -1370,6 +1433,9 @@ class Controller(QObject):
             return future
         if method == 'set_appearance':
             config = {}
+            for key in ('motion', 'intro_enabled', 'background_dim'):
+                if key in params:
+                    config[key] = params[key]
             if 'theme' in params:
                 config['theme'] = params['theme']
             if 'font_scale' in params:
@@ -1543,7 +1609,8 @@ class Controller(QObject):
             self.windowAction.emit('compact', bool(params.get('enabled')))
             result = {'success': True}
         elif method == 'open_data_folder':
-            os.startfile(str(self.store.directory))
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.store.directory.resolve()))):
+                raise RuntimeError('无法打开数据目录，请检查系统文件管理器。')
             result = {'success': True}
         elif method == 'quit':
             self.windowAction.emit('quit', True)
@@ -1570,6 +1637,10 @@ class Controller(QObject):
             self.catalog['available'] = True
             self.catalog['scope'] = 'imported_archive'
             self._sync_hub()
+            try:
+                self.pool.submit(self.imports.warm_search)
+            except RuntimeError:
+                pass
         self.emit()
 
     def _emit_session_done(self, sid, kind, future):
@@ -1907,6 +1978,8 @@ class Controller(QObject):
         if self.closed:
             return
         self.closed = True
+        if self.speech:
+            self.speech.stop()
         self.timer.stop()
         try:
             self.capture.stop(wait=False)

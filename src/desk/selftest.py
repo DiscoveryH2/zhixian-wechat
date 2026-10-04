@@ -14,7 +14,12 @@ def run_self_test(report_file):
         import numpy as np
         from app.ocr import read_title
         from desk.tasks import ModelTasks
-        import windows_capture
+        if sys.platform == 'win32':
+            import windows_capture
+            report['checks'].append('windows_capture_import')
+        elif sys.platform == 'darwin':
+            import keyring.backends.macOS
+            report['checks'].append('keychain_backend_import')
         import sqlcipher3
         import zstandard
         import PySide6.QtWebEngineWidgets
@@ -52,7 +57,7 @@ def run_self_test(report_file):
         value = tasks.submit('test_connection', config).result(timeout=25)
         if not value['success']:
             raise RuntimeError('Isolated model worker did not complete')
-        report['checks'] += ['frozen_model_worker', 'local_typed_http', 'qt_webengine_import', 'windows_capture_import']
+        report['checks'] += ['frozen_model_worker', 'local_typed_http', 'qt_webengine_import']
         report['success'] = True
     except Exception as exc:
         report['error'] = str(exc)[:1000]

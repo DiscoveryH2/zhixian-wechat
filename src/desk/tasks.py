@@ -26,6 +26,9 @@ def _model_job(pipe, kind, payload):
         elif kind == 'run_agent':
             from core.agent import run_agent
             result = run_agent(**payload)
+        elif kind == 'extract_followups':
+            from core.followups import extract_followups
+            result = extract_followups(**payload)
         else:
             raise ValueError('未识别的模型任务。')
         pipe.send((True, result))
@@ -77,6 +80,9 @@ class ModelTasks:
             finally:
                 recv.close()
                 process.join(timeout=1)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=.5)
                 with self.lock:
                     self.jobs.pop(id(future), None)
         threading.Thread(target=watch, name='zhixian-model-result', daemon=True).start()
@@ -106,9 +112,11 @@ class HelperTasks:
         future = Future()
         def work():
             try:
-                future.set_result(fn(*args))
+                if future.set_running_or_notify_cancel():
+                    future.set_result(fn(*args))
             except Exception as exc:
-                future.set_exception(exc)
+                if not future.done():
+                    future.set_exception(exc)
             finally:
                 self.slots.release()
         threading.Thread(target=work, name='zhixian-native-helper', daemon=True).start()

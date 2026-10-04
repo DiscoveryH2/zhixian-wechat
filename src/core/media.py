@@ -24,6 +24,7 @@ import math
 from pathlib import Path
 import re
 import socket
+import secrets
 import struct
 import time
 import urllib.error
@@ -108,13 +109,14 @@ def _resolve_route(config, kind):
     parsed = urllib.parse.urlsplit(base)
     if parsed.hostname == "api.typesafe.ai" or parsed.path.endswith("/systemone"):
         raise _Unsupported("judgment_only", "Jev/TypeSafe 判断接口不接收图片或音频；请单独配置媒体服务。")
-    if kind == "audio" and parsed.hostname == "api.openai.com":
-        raise _Unsupported("transcription_protocol", "当前联网转写使用 OpenRouter 的 JSON 音频协议；OpenAI 原生需要 multipart，本版本尚未适配，请选择 OpenRouter 或兼容此 JSON 协议的服务。")
     model = config.get(prefix + "_model") or ""
     if not model:
-        if parsed.hostname != "openrouter.ai":
+        if kind == 'audio' and parsed.hostname == 'api.openai.com':
+            model = 'whisper-1'
+        elif parsed.hostname != "openrouter.ai":
             raise _Unsupported("model_not_configured", "此媒体服务需要在高级设置指定支持图片或转写的模型。")
-        model = DEFAULT_VISION_MODEL if kind == "image" else DEFAULT_STT_MODEL
+        else:
+            model = DEFAULT_VISION_MODEL if kind == "image" else DEFAULT_STT_MODEL
     model = _model(model)
     if "jev" in model.lower() and (model.lower().startswith(("jev", "typesafe/", "~typesafe/"))):
         raise _Unsupported("judgment_only", "Jev 是结构化判断模型，不能作为图片理解或语音转写模型。")
@@ -138,7 +140,39 @@ def _resolve_route(config, kind):
         main_base = validate_url(config.get("base_url") or "https://openrouter.ai/api")
         if _origin(main_base) == _origin(url):
             key = config.get("api_key") or ""
-    return Route(url, model, _key(key, url), "vision" if kind == "image" else "transcription")
+    multipart = kind == 'audio' and (parsed.hostname == 'api.openai.com' or config.get('stt_protocol') == 'multipart')
+    return Route(url, model, _key(key, url), "vision" if kind == "image" else "multipart" if multipart else "transcription")
+
+
+def _multipart_transcription(route, data, fmt, language, timeout):
+    boundary = 'zhixian-' + secrets.token_hex(24)
+    parts = []
+    fields = {'model': route.model, 'response_format': 'json'}
+    if language:
+        fields['language'] = language
+    for name, value in fields.items():
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.{fmt}"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode())
+    parts.extend((data, f'\r\n--{boundary}--\r\n'.encode()))
+    headers = {'Content-Type': 'multipart/form-data; boundary=' + boundary, 'Accept': 'application/json'}
+    if route.key:
+        headers['Authorization'] = 'Bearer ' + route.key
+    request = urllib.request.Request(route.url, data=b''.join(parts), headers=headers, method='POST')
+    try:
+        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
+            body = response.read(2 * 1024 * 1024 + 1)
+        if len(body) > 2 * 1024 * 1024:
+            raise ProviderError('转写响应过大。')
+        result = json.loads(body)
+        if not isinstance(result, dict) or result.get('error'):
+            raise ProviderError('语音服务未返回有效的转写结果。')
+        return result
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        exc.close()
+        raise ProviderError(f'HTTP {status}：语音转写失败，请检查模型、密钥和额度。') from None
+    except (urllib.error.URLError, OSError, ValueError):
+        raise ProviderError('无法完成语音转写，请检查网络与接口配置。') from None
 
 
 def _fetch_openrouter_model(model, timeout):
@@ -419,7 +453,8 @@ def transcribe_audio(data: bytes, mime_type: str, config: dict, source="user_sel
             payload = {"model": route.model, "input_audio": {"data": base64.b64encode(data).decode("ascii"), "format": fmt}, "response_format": "json", "temperature": 0}
             if language:
                 payload["language"] = language
-            response = _media_post(route, payload, timeout)
+            response = (_multipart_transcription(route, data, fmt, language, timeout)
+                        if route.mode == 'multipart' else _media_post(route, payload, timeout))
             model = route.model
             provider = "openrouter" if urllib.parse.urlsplit(route.url).hostname == "openrouter.ai" else "configured"
             usage, confidence = _usage(response.get("usage")), _probability(response.get("confidence"))

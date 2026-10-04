@@ -130,6 +130,7 @@ class TransportAndLifecycleTests(unittest.TestCase):
         self.assertEqual(client.last_event_id, "22")
         self.assertIsNone(client._stream)
 
+    @unittest.skipIf(sys.platform == 'darwin', 'Windows capture worker')
     def test_pause_stop_releases_capture_and_worker(self):
         events = []
         cap = Mock()

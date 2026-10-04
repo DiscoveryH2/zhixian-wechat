@@ -58,10 +58,10 @@ REVIEWED_ASSETS = {
     # Both versions were separately reviewed synthetic renders. Retain the
     # previous hashes because --history also scans the earlier public commit.
     "docs/images/workspace.png": ("8f1b9d81b18c1b0d9e6ef38a8b58b090b8d1014cfcaf37f891454da979f87bbc",
-                                  "37339b319ef8bf581700bf1d7c78129ef27a42e1e53aa9db41a041530c2f5ea9"),
+                                  "37339b319ef8bf581700bf1d7c78129ef27a42e1e53aa9db41a041530c2f5ea9", "3e3746c8d9bdcc85dfad8e7a700f966f4e90a8d69c89b6f1c256de149208bf86"),
     "docs/images/compact.png": ("2229a5d60c86fe48b8319f6fdb9c2b76632b4654a88038c6042a71055e88652b",
                                 "2abf4924fd61a710de8f4d2c9b417eddbb639ea68f156ef7715470b6ab175078"),
-    "docs/images/intro.png": "28e2dd0bed30120175e8caac10192663f1e954a31c97fa85f302dd742e825745",
+    "docs/images/intro.png": ('28e2dd0bed30120175e8caac10192663f1e954a31c97fa85f302dd742e825745', 'a333b5eca80444cdde11c610b5758e07d2a73ba263b7bc664a83c095109482f3'),
     "docs/images/catalogue.png": "bf9dd39408256b49e128cbdb68a62daf4354ee3e4316ef0e34f75748cb6094dd",
     "docs/images/moments.png": "b724624feb9313ba726136e17527018ee6f79d2409bdde4eefac5820e87af99e",
     "docs/images/auto-reply.png": "b38edc44560a8bb9e0f9b8e78aba699923402e90f5013b74b9c90414e52b2d63",

@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 
 from .backlog import _as_epoch
-from .client import ProviderError, post_json, resolve_decision, resolve_reply
+from .client import post_json, resolve_decision, resolve_reply
 from .draft import draft_candidates
 from .engine import _answers
 from .questions import build_state, judge_questions
@@ -128,6 +128,9 @@ def run_agent(sessions: list[dict], config: dict, *, now=None, post_json_fn=None
         if not isinstance(session, dict):
             session = {}
         sid = session.get("id")
+        raw_messages = session.get("messages") or []
+        raw_latest = raw_messages[-1] if isinstance(raw_messages, list) and raw_messages else None
+        uncertain_latest = isinstance(raw_latest, dict) and raw_latest.get('side', raw_latest.get('from')) not in ('me', 'other', 'her')
         messages = _bounded_messages(session.get("messages", []))
         evidence = [{"message_id": m["id"], "side": "other" if m["from"] == "other" else "me",
                      "text": m["text"][:240]} for m in messages[-3:]]
@@ -136,10 +139,10 @@ def run_agent(sessions: list[dict], config: dict, *, now=None, post_json_fn=None
         latest_media = bool(latest and not _has_understood_text(latest))
         plan = _plan(messages)
         try:
-            if not text_messages or latest_media:
+            if uncertain_latest or session.get('freshness') == 'unavailable' or not text_messages or latest_media:
                 trace.extend({"session_id": sid, "tool": t, "status": "skipped" if t in ("jev.triage", "reply.draft") else "done"} for t in plan)
                 cards.append({"session_id": sid, "title": str(session.get("title") or "")[:200], "action": "review",
-                              "confidence": None, "risk": None, "reason": "最近一条仅有媒体占位或没有可分析的文字消息。",
+                              "confidence": None, "risk": None, "reason": ("数据来源暂不可用，缓存无法确认最新回合。" if session.get('freshness') == 'unavailable' else "最新消息方向无法确认，请人工核对。" if uncertain_latest else "最近一条仅有媒体占位或没有可分析的文字消息。"),
                               "evidence": evidence, "candidates": [], "status": "review"})
                 continue
             trace.append({"session_id": sid, "tool": "history.inspect", "status": "done"})
@@ -148,6 +151,7 @@ def run_agent(sessions: list[dict], config: dict, *, now=None, post_json_fn=None
             relationship = str(config.get("relationship") or "未指定关系")
             state = build_state(messages, relationship, keep=MAX_MESSAGES)
             is_group = str(session.get("type") or "").lower() in {"group", "微信群", "群聊"}
+            type_known = is_group or session.get('type') == 'private'
             state["chat"]["is_group"] = is_group
             state["chat"]["latest_directed_to_me"] = bool(latest and latest.get("directed_to_me") is True)
             # Injected network seam follows the core client's public shape.
@@ -169,6 +173,9 @@ def run_agent(sessions: list[dict], config: dict, *, now=None, post_json_fn=None
             elif risk >= 7:
                 action = "review"
                 review_reason = "当前关系风险较高，请先人工核对语境。"
+            elif not type_known and action in {'reply_now', 'follow_up'}:
+                action = 'review'
+                review_reason = '会话类型无法确认，请先核对私聊或群聊及回应对象。'
             elif latest and latest["from"] == "me" and action == "reply_now":
                 action = "wait"
             elif is_group and latest and latest["from"] == "other" and latest.get("directed_to_me") is not True and action in {"reply_now", "follow_up"}:

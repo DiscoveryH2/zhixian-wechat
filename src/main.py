@@ -36,7 +36,8 @@ def main():
     if args.screenshot and not args.demo:
         parser.error('--screenshot requires --demo to avoid saving private conversation screenshots.')
     root, assets = locations()
-    data = Path(args.data_dir) if args.data_dir else root / ('work/demo-data' if args.demo else 'data')
+    from desk.platforms import data_directory
+    data = Path(args.data_dir) if args.data_dir else data_directory(root, args.demo)
     data.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault('QTWEBENGINE_CHROMIUM_FLAGS', '--disable-logging')
 

@@ -28,7 +28,7 @@ def response(step="reply_now", confidence=.9, risk=3):
 
 
 def session(i=1, messages=None):
-    return {"id": i, "title": "chat", "type": "wechat", "source": "db",
+    return {"id": i, "title": "chat", "type": "private", "source": "db",
             "messages": messages or [{"id": "m1", "side": "other", "kind": "text", "text": "明天几点见？"}]}
 
 

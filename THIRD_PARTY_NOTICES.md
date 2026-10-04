@@ -38,7 +38,7 @@ Source and upstream license/NOTICE snapshots are kept under `vendor/jev-chat-jar
 
 ## Runtime components
 
-Python (PSF), PySide6 / Qt (LGPLv3 or commercial), RapidOCR (Apache-2.0), ONNX Runtime (MIT), NumPy (BSD), Windows Capture (MIT), Pillow (HPND), and their transitive dependencies retain their respective licenses. Qt libraries are dynamically linked and are distributed as replaceable files in this portable directory. Corresponding upstream source is available from https://code.qt.io/cgit/pyside/pyside-setup.git/ and https://code.qt.io/cgit/qt/ . Installed package metadata and license files are preserved where provided by packaging hooks.
+Python (PSF), PySide6 / Qt (LGPLv3 or commercial), RapidOCR (Apache-2.0), ONNX Runtime (MIT), NumPy (BSD), Windows Capture (MIT), Pillow (HPND), and their transitive dependencies retain their respective licenses. Qt libraries are dynamically linked and are distributed as replaceable files in this application directory or macOS bundle. Corresponding upstream source is available from https://code.qt.io/cgit/pyside/pyside-setup.git/ and https://code.qt.io/cgit/qt/ . Installed package metadata and license files are preserved where provided by packaging hooks.
 
 WeFlow integration uses its local documented HTTP interface. No CipherTalk or WeFlow database-key extraction binaries are redistributed by this application.
 
@@ -48,3 +48,7 @@ Some WeChat text payloads are Zstandard-compressed; `zstandard` (BSD-3-Clause, h
 ## Noto Sans SC
 
 The UI bundles unmodified Noto Sans SC from Google Fonts under SIL Open Font License 1.1. The copyright and complete license are preserved in `ui/fonts/OFL.txt`. Source, pinned checksum, and build-time download details are in `ui/fonts/README.md`. No proprietary Windows font is redistributed.
+
+## macOS credentials and speech
+
+macOS credential storage uses `keyring` (MIT) with its system Keychain backend. Its packaged dependencies retain their licenses, including importlib_metadata/zipp (Apache-2.0), jaraco.classes/context/functools (MIT), and more-itertools (MIT). Sources and license metadata accompany the runtime. System speech uses the dynamically linked Qt TextToSpeech module and the installed operating-system voice; no voice-cloning model or third-party voice dataset is included.

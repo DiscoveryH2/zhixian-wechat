@@ -24,12 +24,14 @@ window.ZhixianExperience = Object.freeze({
 
     function updateState(state) {
       const next = state.appearance || {};
-      const theme = next.theme === 'paper' ? 'paper' : 'night';
+      const theme = ['paper', 'aurora'].includes(next.theme) ? next.theme : 'night';
       const scale = Number(next.font_scale || appearance.font_scale || 1);
       const normalized = Math.max(90, Math.min(130, Math.round((scale > 3 ? scale : scale * 100) / 10) * 10));
       const background = next.background_url !== undefined ? next.background_url : appearance.background_url;
       appearance = { ...appearance, ...next, theme, font_scale: normalized / 100, background_url: background || '' };
       document.documentElement.dataset.theme = theme;
+      document.documentElement.dataset.motion = next.motion === false ? 'reduced' : 'full';
+      document.documentElement.style.setProperty('--background-dim', String(next.background_dim ?? .7));
       document.documentElement.dataset.fontScale = String(normalized);
       document.documentElement.dataset.capture = state.status?.capture || 'idle';
       const image = $('#scene-background'), source = safeMedia(appearance.background_url);
@@ -63,7 +65,7 @@ window.ZhixianExperience = Object.freeze({
       document.documentElement.classList.remove('intro-active');
     }
     function startIntro(force = false) {
-      if (!force && (new URLSearchParams(location.search).get('intro') === '0' || matchMedia('(prefers-reduced-motion: reduce)').matches)) return;
+      if (!force && (getState().appearance?.intro_enabled === false || getState().appearance?.motion === false || new URLSearchParams(location.search).get('intro') === '0' || matchMedia('(prefers-reduced-motion: reduce)').matches)) return;
       $('#cinema-intro')?.remove(); clearTimeout(introTimer);
       const intro = el('section', 'cinema-intro'); intro.id = 'cinema-intro'; intro.setAttribute('aria-label', '知弦开场');
       const ambience = el('div', 'intro-ambience'); ambience.setAttribute('aria-hidden', 'true');
@@ -75,7 +77,7 @@ window.ZhixianExperience = Object.freeze({
       const skip = button('跳过开场', 'arrow', dismissIntro, 'intro-skip'); skip.id = 'intro-skip';
       append(intro, ambience, strings, el('div', 'intro-corner corner-top'), el('div', 'intro-corner corner-bottom'), append(el('div', 'intro-center'), glyph, el('p', 'intro-kicker', 'ZHIXIAN / DESKTOP COMPANION'), title, el('p', 'intro-subtitle', '听见话语，也听见弦外之音。')), append(el('div', 'intro-bottom'), el('span', '', '进入你的对话空间'), el('div', 'intro-progress'), el('span', '', '01 / 知弦')), skip);
       document.body.append(intro); document.documentElement.classList.add('intro-active');
-      introTimer = setTimeout(dismissIntro, matchMedia('(prefers-reduced-motion: reduce)').matches ? 300 : 3800);
+      introTimer = setTimeout(dismissIntro, matchMedia('(prefers-reduced-motion: reduce)').matches ? 300 : 4400);
       skip.focus({ preventScroll: true });
     }
 
@@ -120,6 +122,7 @@ window.ZhixianExperience = Object.freeze({
         append(el('div', 'catalog-search'), icon('search', 18), input),
         filters, el('div', 'catalog-source'), el('div', 'catalog-list'), el('div', 'catalog-pagination'),
         append(el('div', 'catalog-footer'), el('span', 'catalog-import-status', isAgent ? '可选择任意来源，包括导入、手动提供和历史会话；仅分析并给出建议，不会发送。' : catalog.multi ? '只会列出已核验可实时接收的会话；归档记录不支持自动发送。' : importBusy ? '正在本机索引，可关闭此窗口继续使用' : '支持 CipherTalk / ChatLab 导出的 JSON、JSONL'), catalog.multi ? append(el('div', 'catalog-import-actions'), button('取消', null, () => dialog.close(), 'small subtle'), button('应用选择', 'check', async () => { try { await catalog.onSelect?.([...catalog.selected.values()]); dialog.close(); } catch (err) { toast(errorText(err), 'error'); } }, 'small primary')) : append(el('div', 'catalog-import-actions'), button('粘贴对话', 'pen', () => { dialog.close(); manualDialog(); }, 'small ghost'), importButton('files', '导入文件', 'upload'), importButton('folder', '导入目录', 'folder'))));
+      const list = $('.catalog-list', dialog); let scrollFrame; list.addEventListener('scroll', () => { cancelAnimationFrame(scrollFrame); scrollFrame = requestAnimationFrame(() => { if (catalog.items.length > 80) paintCatalog(); if (catalog.more && !catalog.busy && list.scrollHeight - list.scrollTop - list.clientHeight < 180) fetchCatalog(false); }); });
       dialog.showModal(); input.focus({ preventScroll: true }); fetchCatalog(true);
     }
     function importButton(mode, label, symbol) {
@@ -143,7 +146,7 @@ window.ZhixianExperience = Object.freeze({
     async function fetchCatalog(reset) {
       if (catalog.busy) return;
       const serial = ++catalog.serial; catalog.busy = true;
-      if (reset) { catalog.items = []; catalog.cursor = null; }
+      if (reset) { catalog.items = []; catalog.cursor = null; $('.catalog-list', $('#session-catalog')).scrollTop = 0; }
       paintCatalog();
       try {
         const result = await rpc('list_sessions', { query: catalog.query.trim(), source: catalog.filter, cursor: reset ? null : catalog.cursor, limit: 12 });
@@ -172,8 +175,10 @@ window.ZhixianExperience = Object.freeze({
       else if (!catalog.available && !catalog.busy) source.append(notice(catalog.detail || '当前没有已连接的会话目录。选择本机微信数据库来源后，此列表只显示数据适配器已读取到的会话；也可连接 WeFlow 或导入记录。', 'info'));
       else { if (catalog.detail && !catalog.busy) source.append(notice(catalog.detail, 'info')); source.append(append(el('div', 'catalog-meta'), el('span', '', catalog.source === 'demo' ? '合成演示会话' : catalog.source === 'wechat_db' ? 'CipherTalk 本机微信数据库会话' : catalog.source === 'weflow' ? 'WeFlow 会话目录' : '当前可用会话'), el('span', '', catalog.total === null ? `已加载 ${catalog.items.length} 个` : `${catalog.total} 个会话`))); }
       if (catalog.busy && !catalog.items.length) list.append(append(el('div', 'catalog-loading'), el('div', 'skeleton wide'), el('div', 'skeleton medium'), el('div', 'skeleton wide')));
-      for (const item of catalog.items) {
-        if (catalog.multi && catalog.mode !== 'agent' && !item.auto_reply_eligible) continue;
+      const visibleItems = catalog.items.filter(item => !(catalog.multi && catalog.mode !== 'agent' && !item.auto_reply_eligible));
+      const virtual = visibleItems.length > 80, start = virtual ? Math.max(0, Math.floor(oldTop / 80) - 5) : 0, end = virtual ? Math.min(visibleItems.length, start + 35) : visibleItems.length;
+      if (start) { const spacer = el('div', 'catalog-spacer'); spacer.style.height = `${start * 80}px`; list.append(spacer); }
+      for (const item of visibleItems.slice(start, end)) {
         const group = Boolean(item.type === 'group' || item.is_group || String(item.id).endsWith('@chatroom'));
         const chosen = catalog.selected.has(String(item.id));
         const row = el('button', `catalog-row${chosen || item.id === getState().current_session?.id ? ' selected' : ''}${item.preview_status === 'pending' ? ' preview-pending' : ''}${catalog.multi ? ' catalog-multi-row' : ''}`); row.type = 'button'; row.dataset.sessionId = String(item.id); if (catalog.multi) row.setAttribute('aria-pressed', String(chosen));
@@ -186,6 +191,7 @@ window.ZhixianExperience = Object.freeze({
           catch (err) { toast(errorText(err), 'error'); row.disabled = false; row.classList.remove('selecting'); }
         }); list.append(row);
       }
+      if (virtual && end < visibleItems.length) { const spacer = el('div', 'catalog-spacer'); spacer.style.height = `${(visibleItems.length - end) * 80}px`; list.append(spacer); }
       if (!list.querySelector('.catalog-row') && !catalog.busy) list.append(empty(catalog.multi && catalog.mode === 'agent' ? '没有找到可分析的对话' : catalog.multi ? '没有已核验的实时会话' : catalog.query ? '没有找到匹配的会话' : '还没有可用的会话', catalog.multi && catalog.mode === 'agent' ? '检查数据源筛选，或手动补充、导入一段对话后再分析。' : catalog.multi ? '导入记录和未核验的会话不会出现在自动回复名单里。' : catalog.query ? '尝试换一个名字，或手动导入对话。' : '打开微信并读取一次，或在设置中连接会话数据源。', 'chat'));
       list.scrollTop = oldTop;
       const footer = $('.catalog-pagination', dialog); footer.replaceChildren();
@@ -198,12 +204,12 @@ window.ZhixianExperience = Object.freeze({
       root.append(heading('知弦 Agent', '一次整理最多三段对话，给出下一步建议和对应依据。', '对话分诊 · 只分析，不发送'));
       const intro = el('section', 'panel agent-mission');
       intro.append(append(el('div', 'agent-orbit'), el('span', '', '弦')), append(el('div', 'agent-mission-copy'), el('span', 'eyebrow', '本轮任务'), el('h2', '', '先看清语境，再决定下一步。'), el('p', '', 'Agent 会逐段检查所选对话，整理建议动作、理由与消息依据。任何回复都只作为候选文本供你自行复制和确认。')));
-      intro.append(button(selected.length ? `管理选择（${selected.length}/3）` : '选择对话', 'people', () => openCatalog(async items => { agent.selected = items; agent.result = null; agent.error = ''; render(); }, { multi: true, mode: 'agent', selected }), 'subtle'));
+      intro.append(button(selected.length ? `管理选择（${selected.length}/3）` : '选择对话', 'people', () => openCatalog(async items => { agent.selected = items; agent.result = null; agent.error = ''; render(); }, { multi: true, mode: 'agent', selected }), 'subtle', agent.busy));
       root.append(intro);
       const selection = el('section', 'panel agent-selection');
       selection.append(append(el('div', 'agent-section-heading'), el('h2', '', '本轮对话'), el('span', 'agent-count', `${selected.length} / 3`)));
       if (!selected.length) selection.append(el('p', 'field-hint', '选择任何可用来源中的对话：微信数据库、WeFlow、导入记录、手动对话或已读取会话。'));
-      for (const item of selected) selection.append(append(el('div', 'agent-selected-row'), el('span', 'agent-selected-mark', item.is_group ? '群' : '弦'), append(el('span', 'agent-selected-copy'), el('strong', '', item.title || item.session_id), el('span', '', `${catalogSourceName(item.source)} · ${item.is_group ? '群聊' : '私聊'}`)), button('移除', 'close', () => { agent.selected = agent.selected.filter(x => x.session_id !== item.session_id); agent.result = null; render(); }, 'small ghost')));
+      for (const item of selected) selection.append(append(el('div', 'agent-selected-row'), el('span', 'agent-selected-mark', item.is_group ? '群' : '弦'), append(el('span', 'agent-selected-copy'), el('strong', '', item.title || item.session_id), el('span', '', `${catalogSourceName(item.source)} · ${item.is_group ? '群聊' : '私聊'}`)), button('移除', 'close', () => { agent.selected = agent.selected.filter(x => x.session_id !== item.session_id); agent.result = null; render(); }, 'small ghost', agent.busy)));
       root.append(selection);
       const configured = Boolean(getState().config?.has_api_key && getState().config?.base_url && getState().config?.model_name);
       if (agent.error) root.append(notice(agent.error, 'error'));
@@ -241,6 +247,7 @@ window.ZhixianExperience = Object.freeze({
       if (data.reason) card.append(el('p', 'agent-reason', data.reason));
       if (Array.isArray(data.evidence) && data.evidence.length) { const block = el('section', 'agent-evidence'); block.append(el('h4', '', '消息依据 · 所选会话快照')); for (const item of data.evidence) block.append(append(el('blockquote', 'agent-quote'), el('p', '', item.text || '（无文本内容）'), append(el('footer'), el('span', '', item.side === 'me' ? '我' : selected.title || '对方'), selected.source ? el('span', '', `来源 · ${selected.source}`) : null, item.message_id ? el('span', 'agent-citation', `消息 ${item.message_id}`) : null))); card.append(block); }
       if (Array.isArray(data.candidates) && data.candidates.length) { const candidates = el('section', 'agent-candidates'); candidates.append(el('h4', '', '回复候选（复制后由你自行决定是否发送）')); for (const text of data.candidates) candidates.append(append(el('div', 'agent-candidate'), el('p', '', text), button('复制候选', 'copy', async () => { const result = await rpc('copy_reply', { text }); if (result?.success === false || result?.available === false) throw new Error(result.message || '复制失败。'); toast('候选文本已复制；请自行确认是否发送。'); }, 'small ghost'))); card.append(candidates); }
+      if (['reply_now','follow_up'].includes(data.action)) card.append(button('确认跟进行动', 'check', () => api.confirmFollowup(data.session_id), 'small subtle', agent.busy));
       if (data.status) card.append(el('span', 'agent-card-status', `状态 · ${agentStatusLabel(data.status)}`)); return card;
     }
     function agentStatusLabel(status) { return ({ done: '已完成', partial: '部分完成', success: '成功', completed: '已完成', sample: '合成样例', demo_only: '演示状态', running: '进行中', pending: '等待处理', skipped: '已跳过', failed: '失败', error: '异常', unavailable: '不可用' })[status] || status || '完成'; }
@@ -501,7 +508,7 @@ window.ZhixianExperience = Object.freeze({
       const main = el('div', 'appearance-main');
       const themes = el('section', 'panel appearance-section'); themes.append(el('h2', '', '知弦风格'), el('p', 'section-description', '安静的正文，带一点探索的仪式感。'));
       const choices = el('div', 'theme-choices');
-      for (const [theme, label, desc] of [['night', '夜航', '深石墨 · 青碧微光'], ['paper', '纸白', '浅纸色 · 墨绿留白']]) {
+      for (const [theme, label, desc] of [['aurora', '极光', '蓝紫与琥珀 · 深空探索'], ['night', '夜航', '深石墨 · 青碧微光'], ['paper', '纸白', '浅纸色 · 墨绿留白']]) {
         const b = el('button', `theme-choice theme-${theme}${appearance.theme === theme ? ' selected' : ''}`); b.type = 'button'; b.setAttribute('aria-pressed', String(appearance.theme === theme));
         const miniature = el('span', 'theme-miniature'); for (let i = 0; i < 4; i++) miniature.append(el('i'));
         append(b, miniature, append(el('span', 'theme-choice-copy'), el('b', '', label), el('span', '', desc)), appearance.theme === theme ? icon('check', 17) : null);
@@ -514,6 +521,9 @@ window.ZhixianExperience = Object.freeze({
       reading.append(sizes, append(el('div', 'reading-preview'), el('span', 'reading-preview-label', '阅读预览'), el('p', '', '一句合适的回应，来自对语境的理解。'), el('span', '', '让重要的文字，清楚地留在眼前。'))); main.append(reading);
       const background = el('section', 'panel appearance-section'); background.append(el('h2', '', '自定义背景'), el('p', 'section-description', '选择本地图片。知弦会自动覆盖遮罩，保证消息始终易读。'));
       background.append(append(el('div', 'background-actions'), button('上传背景图', 'image', async () => { const result = await rpc('choose_background'); if (result.appearance) setState({ appearance: result.appearance }); else await sync(); if (demo) toast('演示模式使用内置合成背景。'); }, 'primary', !available()), button('恢复默认', 'refresh', async () => { const result = await rpc('clear_background'); if (result.appearance) setState({ appearance: result.appearance }); else await sync(); }, '', !available() || !appearance.background_url)));
+      background.append(field('背景遮罩强度', 'background-dim', appearance.background_dim ?? .7, { type: 'range' }));
+      const dim = $('#background-dim', background); dim.min = '.3'; dim.max = '.9'; dim.step = '.1'; dim.addEventListener('change', () => saveAppearance({ background_dim: Number(dim.value) }).catch(err => toast(errorText(err), 'error')));
+      for (const [key, label] of [['motion','界面动效'], ['intro_enabled','启动时播放开场']]) background.append(button(`${label} · ${appearance[key] === false ? '关闭' : '开启'}`, 'play', () => saveAppearance({ [key]: appearance[key] === false }), 'small subtle'));
       background.append(el('p', 'field-hint', '背景仅在本机显示，不会作为模型分析内容上传。')); main.append(background);
       const side = el('aside', 'appearance-aside');
       const sigil = el('div', 'appearance-sigil'); for (let i = 0; i < 3; i++) sigil.append(el('i'));
@@ -646,7 +656,7 @@ window.ZhixianExperience = Object.freeze({
       const target = event.target.closest('button');
       if (target && !target.disabled && !matchMedia('(prefers-reduced-motion: reduce)').matches) { target.classList.remove('interaction-pulse'); void target.offsetWidth; target.classList.add('interaction-pulse'); setTimeout(() => target.classList.remove('interaction-pulse'), 450); }
     });
-    updateState(getState()); startIntro();
+    updateState(getState());
     return { updateState, reconcileSnapshot, renderAppearance, renderMoments, renderAutoReply, renderAgent, openCatalog, messageContent, historyControl, chooseMedia, startIntro };
   }
 });

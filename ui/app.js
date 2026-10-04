@@ -51,8 +51,8 @@
   const demo = new URLSearchParams(location.search).get('demo') === '1';
   const pending = new Map();
   let bridge = null, counter = 0, page = 'workspace', compact = window.innerWidth <= 640, online = false, search = '', currentState;
-  let renderQueued = false, experience = null, lastWorkspaceKey = null, lastAutoReplyKey = null;
-  const blank = () => ({ config: { base_url: '', model_name: '', has_api_key: false, reply_model: '', reply_base_url: '', has_reply_api_key: false, relationship: '朋友', style: '自然简洁', auto_analyze: true, context_limit: 30, save_history: false, always_on_top: false, source: 'ocr', weflow_url: 'http://127.0.0.1:5031', weflow_has_token: false, debounce_ms: 1800 }, status: { capture: 'idle', analysis: 'idle', detail: '等待开始读取微信', last_error: '', source: 'ocr', connected: false }, auto_reply: { enabled: false, paused: false, status: 'off', detail: '', allowlist: [], group_mode: 'mention_only', debounce_seconds: 4, cooldown_seconds: 45, hourly_limit: 8, daily_limit: 40, sent_hour: 0, sent_day: 0, recent: [] }, sessions: [], current_session: null, analysis: null, notes: [], contacts: [], version: '1.6.0' });
+  let renderQueued = false, experience = null, workbench = null, lastWorkspaceKey = null, lastAutoReplyKey = null;
+  const blank = () => ({ config: { base_url: '', model_name: '', has_api_key: false, reply_model: '', reply_base_url: '', has_reply_api_key: false, relationship: '朋友', style: '自然简洁', auto_analyze: true, context_limit: 30, save_history: false, always_on_top: false, source: 'ocr', weflow_url: 'http://127.0.0.1:5031', weflow_has_token: false, debounce_ms: 1800 }, status: { capture: 'idle', analysis: 'idle', detail: '等待开始读取微信', last_error: '', source: 'ocr', connected: false }, auto_reply: { enabled: false, paused: false, status: 'off', detail: '', allowlist: [], group_mode: 'mention_only', debounce_seconds: 4, cooldown_seconds: 45, hourly_limit: 8, daily_limit: 40, sent_hour: 0, sent_day: 0, recent: [] }, sessions: [], current_session: null, analysis: null, notes: [], contacts: [], version: '1.7.0' });
   currentState = blank();
   const configured = () => currentState.config.has_api_key && currentState.config.base_url && currentState.config.model_name;
   const live = () => ['live', 'searching'].includes(currentState.status.capture);
@@ -72,7 +72,7 @@
     if (!bridge) return Promise.reject(new Error('请通过「启动知弦」桌面入口打开，浏览器预览无法连接微信。'));
     return new Promise((resolve, reject) => {
       const id = String(++counter);
-      const timeout = setTimeout(() => { pending.delete(id); reject(new Error('操作等待超时，请检查模型连接或微信窗口后重试。')); }, method === 'import_chat_records' ? 600000 : method === 'run_agent' ? 210000 : ['analyze', 'test_connection', 'analyze_moment', 'transcribe_voice', 'analyze_image', 'choose_media'].includes(method) ? 180000 : 45000);
+      const timeout = setTimeout(() => { pending.delete(id); reject(new Error('操作等待超时，请检查模型连接或微信窗口后重试。')); }, method === 'import_chat_records' ? 600000 : method === 'run_agent' ? 210000 : ['analyze', 'test_connection', 'analyze_moment', 'transcribe_voice', 'analyze_image', 'choose_media', 'extract_followups'].includes(method) ? 180000 : 45000);
       pending.set(id, { resolve, reject, timeout });
       try { bridge.request(JSON.stringify({ id, method, params })); } catch (err) { clearTimeout(timeout); pending.delete(id); reject(err); }
     });
@@ -120,11 +120,13 @@
   }
   function empty(title, desc, name, action) { return append(el('div', 'empty'), append(el('div', 'empty-icon'), icon(name, 24)), el('h3', '', title), el('p', '', desc), action || null); }
   async function action(method, params = {}, success) { const result = await rpc(method, params); if (success) toast(success); await sync(); return result; }
-  async function toggleCapture() { await action(live() ? 'pause_capture' : 'start_capture'); }
+  async function toggleCapture() {
+    if (currentState.config.source === 'archive') { experience.openCatalog(); return; } await action(live() ? 'pause_capture' : 'start_capture'); }
   async function toggleCompact() { const enabled = !compact; await rpc('set_compact', { enabled }); compact = enabled; $('#app').classList.toggle('compact', compact); render(true); }
   function renderNavigation() {
     const nav = $('#navigation'); nav.replaceChildren();
-    for (const [id, label, name] of [['workspace', '工作台', 'chat'], ['agent', '知弦 Agent', 'spark'], ['auto-reply', '自动回复', 'pulse'], ['moments', '朋友圈', 'moments'], ['knowledge', '知识库', 'book'], ['contacts', '联系人', 'people'], ['appearance', '外观', 'palette'], ['settings', '设置', 'settings']]) {
+    for (const [id, label, name] of [['workspace', '工作台', 'chat'], ['agent', '知弦 Agent', 'spark'], ['actions', '行动中心', 'check'], ['auto-reply', '自动回复', 'pulse'], ['moments', '朋友圈', 'moments'], ['knowledge', '知识库', 'book'], ['contacts', '联系人', 'people'], ['appearance', '外观', 'palette'], ['settings', '设置', 'settings']]) {
+      if (id === 'auto-reply' && currentState.capabilities?.send === false) continue;
       const b = el('button', `nav-button${page === id ? ' active' : ''}`); b.type = 'button'; b.setAttribute('aria-label', label); b.setAttribute('aria-current', page === id ? 'page' : 'false'); b.title = label;
       append(b, icon(name, 21), el('span', '', label)); b.addEventListener('click', () => go(id)); nav.append(b);
     }
@@ -140,7 +142,7 @@
     chip.className = `status-chip ${autoReplyLabel ? `auto-reply-chip ${autoReply.enabled && !autoReply.paused ? 'running' : autoReply.status === 'emergency' ? 'error' : ''}` : status.analysis === 'running' ? 'running' : status.capture === 'live' ? 'live' : status.capture === 'error' ? 'error' : ''}`;
     $('#footer-status').textContent = status.detail || '本地工作台已就绪';
     $('#footer-meta').textContent = currentState.config.model_name ? `${currentState.config.model_name} · ${sourceLabel(currentState.config.source)}` : 'Jev · 语境与判断';
-    $('#version').textContent = String(currentState.version || '1.6.0');
+    $('#version').textContent = String(currentState.version || '1.7.0');
     $('#demo-label').hidden = !demo;
     $('#mini-expand').hidden = !compact;
     renderNavigation();
@@ -163,6 +165,7 @@
     else if (page === 'appearance') main.replaceChildren(experience.renderAppearance());
     else if (page === 'auto-reply') main.replaceChildren(experience.renderAutoReply());
     else if (page === 'agent') main.replaceChildren(experience.renderAgent());
+    else if (page === 'actions') main.replaceChildren(workbench.renderActions());
     else if (page === 'moments') main.replaceChildren(experience.renderMoments());
     else main.replaceChildren(collection(page));
     if (page === 'workspace') lastWorkspaceKey = workspaceKey;
@@ -170,23 +173,24 @@
     main.scrollTop = oldScroll;
     const nextTimeline = $('.timeline');
     if (nextTimeline) nextTimeline.scrollTop = !oldTimeline || oldTimeline.end || nextTimeline.dataset.session !== oldTimeline.session ? nextTimeline.scrollHeight : oldTimeline.top;
+    if (currentState.current_session?.highlight_message_id) requestAnimationFrame(() => $('.message-hit')?.scrollIntoView({ block: 'center' }));
     const nextJudgment = $('.judgment-details'); if (nextJudgment) nextJudgment.open = judgmentOpen;
     const nextAssist = $('.assistant-panel'); if (nextAssist) nextAssist.scrollTop = assistScroll;
   }
-  function sourceLabel(source) { return source === 'wechat_db' ? '本机微信数据库 · CipherTalk' : source === 'weflow' ? 'WeFlow 本地接口' : source === 'manual' ? '手动提供的对话' : source === 'import' ? '已导入的聊天记录' : source === 'demo' ? '合成演示数据' : '微信窗口 · 本地 OCR'; }
+  function sourceLabel(source) { return source === 'archive' ? '本机聊天归档' : source === 'wechat_db' ? '本机微信数据库 · CipherTalk' : source === 'weflow' ? 'WeFlow 本地接口' : source === 'manual' ? '手动提供的对话' : source === 'import' ? '已导入的聊天记录' : source === 'demo' ? '合成演示数据' : '微信窗口 · 本地 OCR'; }
   function workspace() {
     const s = currentState, current = s.current_session, busy = s.status.analysis === 'running';
     const root = el('section', 'page workspace');
     root.append(heading('对话工作台', '当前会话的上下文、判断与回复建议。', null, [
       button('手动补充', 'pen', () => manualDialog(), 'ghost', !available()),
       button('分析当前', 'spark', () => action('analyze', { session_id: current?.id }), '', !available() || !current?.messages?.length || busy),
-      button(live() ? '暂停观察' : '开始观察', live() ? 'pause' : 'play', toggleCapture, live() ? 'subtle' : 'primary', !available()),
+      button(s.config.source === 'archive' ? '选择归档' : live() ? '暂停观察' : '开始观察', live() ? 'pause' : 'play', toggleCapture, live() ? 'subtle' : 'primary', !available()),
     ]));
     if (compact) root.append(append(el('div', 'compact-heading'), append(el('div'), el('h2', '', current?.title || '等待一段对话'), el('p', '', live() ? '新消息将触发实时分析' : '当前观察已暂停')), append(el('div', 'compact-controls'), button('分析', 'spark', () => action('analyze', { session_id: current?.id }), 'small', !current?.messages?.length || busy), button(live() ? '暂停' : '开始', live() ? 'pause' : 'play', toggleCapture, 'small subtle'))));
     if (s.status.last_error) { const n = notice(s.status.last_error, 'error'); n.classList.add('inline-error'); root.append(n); }
     const grid = el('div', 'workspace-grid');
     const chat = el('section', 'panel chat-panel'); chat.setAttribute('aria-label', '当前对话');
-    const identity = append(el('div', 'session-identity'), el('div', 'avatar', current?.title?.slice(0, 1) || '弦'), append(el('div'), el('div', `session-name${!current ? ' session-empty-title' : ''}`, current?.title || '尚未选择会话'), append(el('div', 'session-caption'), el('span', live() && current ? 'live-label' : '', current ? `${current.messages?.length || 0} 条上下文` : '在微信中打开一段聊天'))));
+    const identity = append(el('div', 'session-identity'), el('div', 'avatar', current?.title?.slice(0, 1) || '弦'), append(el('div'), el('div', `session-name${!current ? ' session-empty-title' : ''}`, current?.title || '尚未选择会话'), append(el('div', 'session-caption'), el('span', live() && current ? 'live-label' : '', current ? `${current.messages?.length || 0} 条上下文` : '导入归档或选择可用会话'))));
     const sessionSelect = button('切换会话', 'search', () => experience.openCatalog(), 'small', !available());
     chat.append(append(el('div', 'panel-top'), identity, append(el('div', 'session-picker'), sessionSelect)));
     chat.append(append(el('div', 'source-strip'), icon('window', 13), el('span', '', sourceLabel(current?.source || s.config.source)), el('span', '', '·'), el('span', '', current?.source === 'wechat_db' ? '本机数据库会话' : current?.active ? '当前可见会话' : current ? '历史上下文' : '仅观察当前可见窗口')));
@@ -195,12 +199,13 @@
       timeline.append(experience.historyControl(current), el('div', 'time-divider', '已读取的对话上下文'));
       for (const [idx, message] of current.messages.entries()) {
         const m = el('article', `message ${message.side === 'me' ? 'me' : 'other'}${idx === current.messages.length - 1 ? ' message-latest' : ''}`);
+        m.dataset.messageId = message.id; if (message.id === current.highlight_message_id) m.classList.add('message-hit');
         append(m, append(el('div', 'message-meta'), el('span', 'sender', message.side === 'me' ? '我' : message.sender || current.title), el('time', '', formatTime(message.timestamp))), experience.messageContent(message, current));
         timeline.append(m);
       }
-    } else timeline.append(empty(live() ? '正在寻找你的对话' : '从一段对话开始', live() ? '请保持微信聊天窗口可见。知弦会在这里整理识别到的消息。' : '打开电脑微信并选择会话，然后开始观察。也可以手动补充一段对话。', 'chat', !live() ? button('开始观察微信', 'play', toggleCapture, 'primary small', !available()) : null));
+    } else timeline.append(empty(live() ? '正在寻找你的对话' : '从一段对话开始', live() ? '请保持微信聊天窗口可见。知弦会在这里整理识别到的消息。' : '从全局会话导入并选择完整聊天记录，或连接当前平台可用的数据源。', 'chat', !live() ? button('选择会话', 'people', () => experience.openCatalog(), 'primary small', !available()) : null));
     chat.append(timeline);
-    chat.append(append(el('div', 'chat-bottom'), append(el('div', 'capture-hint'), icon('eye', 13), el('span', '', live() ? '持续读取可见消息' : '观察已暂停')), append(el('div', 'chat-tools'), iconButton('选择本机图片并分析', 'image', () => experience.chooseMedia(current, 'image')), iconButton('选择本机音频并转写', 'voice', () => experience.chooseMedia(current, 'voice')), button('读取一次', 'refresh', () => action('one_shot'), 'small ghost', !available()))));
+    chat.append(append(el('div', 'chat-bottom'), append(el('div', 'capture-hint'), icon('eye', 13), el('span', '', s.config.source === 'archive' ? '按需加载本机归档' : live() ? '持续读取可见消息' : '观察已暂停')), append(el('div', 'chat-tools'), button('跟进', 'check', () => workbench.actionDialog(current), 'small ghost'), iconButton('选择本机图片并分析', 'image', () => experience.chooseMedia(current, 'image')), iconButton('选择本机音频并转写', 'voice', () => experience.chooseMedia(current, 'voice')), button(s.config.source === 'archive' ? '选择记录' : '读取一次', 'refresh', () => s.config.source === 'archive' ? experience.openCatalog() : action('one_shot'), 'small ghost', !available()))));
     const assistant = el('section', 'assistant-panel'); assistant.setAttribute('aria-label', 'Jev 分析与回复');
     const analysis = s.analysis?.session_id === current?.id ? s.analysis : null;
     assistant.append(analysisPanel(analysis, busy));
@@ -265,10 +270,11 @@
       card.append(append(el('div', 'reply-top'), number, percentage(candidate.score) ? el('span', 'reply-score', `匹配 ${percentage(candidate.score)}`) : null));
       card.append(el('p', 'reply-text', candidate.text || ''));
       if (candidate.reason) card.append(append(el('div', 'reply-reason'), icon('info', 12), el('span', '', candidate.reason)));
+      if (currentState.capabilities?.send === false) session = { ...session, active: false };
       const copy = button('复制', 'copy', () => action('copy_reply', { text: candidate.text }, '已复制回复'), 'small ghost', !candidate.text || !available());
       const fill = button('填入微信', 'fill', () => action('fill_reply', { session_id: session.id, index: idx }, demo ? '演示模式：未向微信写入内容' : '已填入微信，请确认后自行发送'), `small ${best ? 'primary' : ''}`, !session?.active || !candidate.text || !available());
       if (!session?.active) fill.title = '需在微信中打开同名会话，并重新读取后回填';
-      card.append(append(el('div', 'reply-bottom'), el('span', 'reply-footer-hint', session?.active ? '仅填入，不自动发送' : '回填前需重新读取当前会话'), append(el('div', 'reply-actions'), copy, fill)));
+      card.append(append(el('div', 'reply-bottom'), el('span', 'reply-footer-hint', session?.active ? '仅填入，不自动发送' : '回填前需重新读取当前会话'), append(el('div', 'reply-actions'), button('朗读', 'voice', () => rpc('speak_text', { text: candidate.text }), 'small ghost'), button('停止', 'pause', () => rpc('stop_speech'), 'small ghost'), copy, fill)));
       section.append(card);
     }
     return section;
@@ -297,7 +303,7 @@
   }
   function primaryFields(form) {
     const c = currentState.config;
-    form.append(field('API Key', 'api_key', '', { type: 'password', placeholder: c.has_api_key ? '已安全保存，留空保留' : '输入你的 Jev API Key', hint: c.has_api_key ? '密钥不会回传到界面。输入新值即可替换。' : '只保存在这台电脑，由 Windows 加密保护。' }));
+    form.append(field('API Key', 'api_key', '', { type: 'password', placeholder: c.has_api_key ? '已安全保存，留空保留' : '输入你的 Jev API Key', hint: c.has_api_key ? '密钥不会回传到界面。输入新值即可替换。' : '只保存在这台电脑：Windows 使用 DPAPI，macOS 使用钥匙串。' }));
     form.append(field('Base URL', 'base_url', c.base_url, { placeholder: 'https://你的模型服务地址', hint: '填写模型提供方给出的 API 地址。' }));
     form.append(field('Model name', 'model_name', c.model_name, { placeholder: '填写你的 Jev 模型名称' }));
   }
@@ -340,7 +346,7 @@
     const title = el('h1'); append(title, '微信里的对话，', document.createElement('br'), el('em', '', '有 Jev 一起斟酌。')); copy.append(title);
     copy.append(el('p', 'welcome-intro', '在电脑端读取对话、理解沟通意图，获得有依据的回复建议。只填三项模型配置，即可开始。'));
     const steps = el('div', 'welcome-steps');
-    for (const [n, text] of [['01', '接入你已经拥有的 Jev 模型'], ['02', '打开电脑微信，选择一段对话'], ['03', '开始观察，获取即时分析与回应建议']]) steps.append(append(el('div', 'welcome-step'), el('span', 'step-number', n), el('span', '', text)));
+    for (const [n, text] of [['01', '接入你已经拥有的 Jev 模型'], ['02', '导入完整记录，选择客户会话'], ['03', '分析、核对证据并确认下一步行动']]) steps.append(append(el('div', 'welcome-step'), el('span', 'step-number', n), el('span', '', text)));
     copy.append(steps);
     const form = el('form', 'welcome-form'); form.id = 'onboarding-form'; form.autocomplete = 'off'; form.append(el('div', 'eyebrow', '第一次见面'), el('h2', '', '三项配置，就此开始'), el('p', 'form-description', '使用你自己的模型服务。保存后，随时可以在设置中调整。')); primaryFields(form); configActions(form, true);
     form.append(append(el('div', 'privacy-caption'), icon('lock', 12), el('span', '', '仅将选中的对话上下文和相关背景发往你配置的 API。本地历史默认关闭，候选回复不会自动发送到微信。')));
@@ -355,7 +361,7 @@
     const generation = el('section', 'advanced-section'); generation.append(el('h3', '', '候选回复生成（可选）'), el('p', 'field-hint', 'OpenRouter 接入可复用同一密钥，默认用 deepseek/deepseek-v4.1-flash 起草回复。TypeSafe 直连或自定义判断服务需另配生成模型，才能提供候选回复。'));
     generation.append(field('生成模型名称', 'reply_model', c.reply_model, { optional: true, placeholder: '留空：OpenRouter 使用默认回复模型' }), field('生成模型 Base URL', 'reply_base_url', c.reply_base_url, { optional: true, placeholder: '留空：按服务自动匹配' }), field('生成模型 API Key', 'reply_api_key', '', { type: 'password', optional: true, placeholder: c.has_reply_api_key ? '已保存，留空保留' : '留空：仅同服务复用主密钥' }));
     const source = el('section', 'advanced-section'); source.append(el('h3', '', '消息读取'));
-    source.append(field('读取来源', 'source', c.source === 'auto' ? 'ocr' : c.source, { options: [['ocr', '微信可见窗口（本地 OCR）'], ['wechat_db', '本机微信数据库（CipherTalk 已配置账号）'], ['weflow', '已有 WeFlow 本地服务']] }), el('p', 'field-hint', '数据库来源在微信保持登录、窗口最小化或收至托盘时仍可读取新消息；复用 CipherTalk 已配置账号，数据库密钥不会进入知弦设置。切换会话后会重新建立上下文。'));
+    source.append(field('读取来源', 'source', c.source === 'auto' ? 'ocr' : c.source, { options: [['archive', '主动导入的聊天归档'], ...(currentState.capabilities?.native_capture === false ? [] : [['ocr', '微信可见窗口（本地 OCR）'], ['wechat_db', '本机微信数据库（CipherTalk 已配置账号）']]), ['weflow', '已有 WeFlow 本地服务']] }), el('p', 'field-hint', '数据库来源在微信保持登录、窗口最小化或收至托盘时仍可读取新消息；复用 CipherTalk 已配置账号，数据库密钥不会进入知弦设置。切换会话后会重新建立上下文。'));
     source.append(field('WeFlow 地址', 'weflow_url', c.weflow_url, { optional: true, placeholder: 'http://127.0.0.1:5031' }), field('WeFlow 访问令牌', 'weflow_token', '', { type: 'password', optional: true, placeholder: c.weflow_has_token ? '已保存，留空保留' : '仅当你的服务需要验证时填写' }));
     source.append(button('检查读取来源', 'refresh', async () => { const result = await rpc('refresh_sources'); const sources = Array.isArray(result) ? result : result?.sources; if (sources?.length) toast(sources.map(s => typeof s === 'string' ? s : s.title || s.name || s.source || '已发现来源').join('；')); else toast(typeof result?.message === 'string' ? result.message : '已刷新来源，请检查所选数据源。'); }, 'small', !available()));
     const behavior = el('section', 'advanced-section'); behavior.append(el('h3', '', '分析与表达'));
@@ -365,7 +371,10 @@
     behavior.append(toggle('新消息到来时自动分析', 'auto_analyze', c.auto_analyze), toggle('窗口保持置顶', 'always_on_top', c.always_on_top), toggle('在本机保留会话历史', 'save_history', c.save_history, '关闭时仍会在当前运行期间保留上下文。'));
     const data = el('section', 'advanced-section'); data.append(el('h3', '', '本地数据'));
     data.append(append(el('div', 'data-actions'), button('打开数据文件夹', 'folder', () => rpc('open_data_folder'), 'small', !available()), button('清除会话历史', 'trash', () => confirmDialog('清除会话历史', '此操作会清除本地保存的聊天上下文和分析记录，知识库、联系人和模型设置仍会保留。', async () => { await action('clear_history', {}, '会话历史已清除'); }), 'small danger', !available())));
-    append(body, generation, source, behavior, data); advanced.append(body); form.append(advanced); configActions(form);
+    const media = el('section', 'advanced-section'); media.append(el('h3', '', '图片、语音与朗读'), el('p', 'field-hint', '收到的语音使用 STT 转写，回复朗读使用本机 TTS。联网识别只处理你明确选择的原件。'));
+    for (const [prefix, label] of [['vision','视觉识别'],['stt','语音转写']]) media.append(field(`${label}模型`, `${prefix}_model`, c[`${prefix}_model`], { optional: true }), field(`${label} API 地址`, `${prefix}_base_url`, c[`${prefix}_base_url`], { optional: true }), field(`${label} API Key`, `${prefix}_api_key`, '', { type: 'password', optional: true, placeholder: c[`has_${prefix}_api_key`] ? '已保存，留空保留' : '仅同来源可复用主 Key' }));
+    media.append(field('语音识别来源', 'stt_backend', c.stt_backend, { options: [['auto','自动'],['cloud','联网'],['local','本地离线模型']] }), field('转写接口协议', 'stt_protocol', c.stt_protocol || 'auto', { options: [['auto','自动（OpenAI multipart / OpenRouter JSON）'],['multipart','OpenAI 兼容 multipart'],['json','OpenRouter 兼容 JSON']] }), field('本地语音模型目录', 'stt_local_model', c.stt_local_model, { optional: true }), toggle('允许联网媒体处理', 'media_allow_cloud', c.media_allow_cloud, '主动识别的图片或音频可能发送到相应服务；系统朗读在本机完成。'));
+    append(body, generation, source, media, behavior, data); advanced.append(body); form.append(advanced); configActions(form);
     const aside = el('aside', 'settings-aside');
     for (const [idx, title, desc] of [['01', '模型负责判断', 'Jev 用对话语境理解意图、需求和风险。模型服务的实际能力决定可用的分析与生成功能。'], ['02', '数据库负责倾听', '选择本机数据库后，微信保持登录即可在后台读取联系人和群聊新消息。'], ['03', '发送范围由你决定', '自动回复默认关闭；开启后仍受会话名单、Jev 判断、风险与发送核验约束。']]) aside.append(append(el('div', 'settings-help'), el('div', 'help-index', idx), el('h3', '', title), el('p', '', desc)));
     append(grid, form, aside); root.append(grid); return root;
@@ -468,7 +477,8 @@
     demoSnapshot.analysis = demoAnalysis('demo-session-1');
     demoSnapshot.notes = [{ id: 'demo-note-1', title: '品牌提案 · 本周背景', content: '客户更重视具体业务场景。第一轮提案聚焦用户洞察和可执行的路径，避免过多概念表达。', tags: ['工作', '提案'], always: false }];
     demoSnapshot.contacts = [{ id: 'demo-contact-1', name: '林以宁', aliases: ['以宁'], relationship: '项目同事', notes: '负责客户沟通，喜欢先确认方向再讨论细节。' }];
-    demoSnapshot.appearance = { theme: 'night', font_scale: 1, background_url: '' };
+    demoSnapshot.actions = [{ id: 'demo-follow-up', session_id: 'demo-session-1', session_title: '林以宁 · 客户方案', title: '核对客户场景，准备下一轮方案', detail: '确认业务场景与可执行路径，再给客户明确的讨论时间。', state: 'open', revision: 1, evidence: [{ side: 'other', text: '客户之前很在意落地，你觉得要不要放个更具体的场景？' }] }];
+    demoSnapshot.appearance = { theme: 'aurora', font_scale: 1, background_url: '' };
     demoSnapshot.catalog = { available: true, source: 'demo', detail: '演示目录 · 合成会话' };
     const names = ['周思远', '设计提案讨论组', '许知遥', '产品协作组', '陈序', '唐映宁', '周末徒步', '顾予安', '林悦', '研发小队', '程书', '许漫', '摄影同行', '沈禾', '江岚'];
     names.forEach((name, i) => demoSnapshot.sessions.push({ id: `demo-more-${i}`, title: name, is_group: /组|队|同行|徒步/.test(name), preview: i % 3 === 0 ? '[图片]' : i % 3 === 1 ? '[语音] 18秒' : '好的，我们明天再确认一下。', kind: i % 3 === 0 ? 'image' : i % 3 === 1 ? 'voice' : 'text', updated: now.toISOString(), source: 'demo', count: 3, auto_reply_eligible: i < 5, auto_reply_type_known: true }));
@@ -490,6 +500,12 @@
   async function demoRequest(method, params) {
     if (!demoSnapshot) initializeDemo();
     if (method === 'bootstrap') return structuredClone(demoSnapshot);
+    if (method === 'extract_followups') return { proposals: [{ title: '核对客户场景，准备下一轮方案', detail: '合成提案：确认后才保存。', evidence: [{ quote: '客户之前很在意落地' }], message_ids: [] }], warning: '合成演示，不调用模型。' };
+    if (method === 'list_actions') return { items: demoSnapshot.actions || [], has_more: false };
+    if (method === 'create_action') { const item = { ...params.action, id: `demo-action-${Date.now()}`, session_id: params.session_id, session_title: '合成客户会话', state: 'open', revision: 1, evidence: [] }; (demoSnapshot.actions ||= []).push(item); return item; }
+    if (method === 'update_action') { const item = demoSnapshot.actions?.find(x => x.id === params.id); if (item) { item.state = params.state; item.revision++; } return item; }
+    if (method === 'search_messages') return { items: [], has_more: false };
+    if (['speak_text', 'stop_speech'].includes(method)) return { success: true, message: '合成演示不调用系统语音。' };
     if (method === 'run_agent') {
       const ids = Array.isArray(params.session_ids) ? params.session_ids.slice(0, 3) : [];
       if (!ids.length) throw new Error('请先选择至少一段合成对话。');
@@ -564,7 +580,7 @@
     render(true);
   }
   function connect() {
-    if (demo) { online = true; initializeDemo(); setState(structuredClone(demoSnapshot)); return; }
+    if (demo) { online = true; initializeDemo(); setState(structuredClone(demoSnapshot)); experience.startIntro(); return; }
     if (typeof qt !== 'undefined' && typeof QWebChannel !== 'undefined') {
       new QWebChannel(qt.webChannelTransport, channel => {
         bridge = channel.objects.bridge; if (!bridge) { offline(); return; } online = true;
@@ -574,7 +590,7 @@
         bridge.event.connect(raw => {
           try { const event = typeof raw === 'string' ? JSON.parse(raw) : raw; if (event.type === 'state') setState(event.data); if (event.type === 'toast') toast(event.data?.message || '', event.data?.level); } catch { /* Ignore malformed events; never expose their raw content. */ }
         });
-        sync().catch(err => { toast(errorText(err), 'error'); render(true); });
+        sync().then(() => experience.startIntro()).catch(err => { toast(errorText(err), 'error'); render(true); });
       });
     } else offline();
   }
@@ -590,6 +606,8 @@
     const next = window.innerWidth <= 640;
     if (next !== compact) { compact = next; $('#app').classList.toggle('compact', compact); render(); }
   });
-  experience = window.ZhixianExperience.mount({ $, el, append, icon, button, iconButton, notice, empty, heading, tag, rpc, action, sync, setState, getState: () => currentState, getPage: () => page, go, render, toast, errorText, formatTime, valueText, available, showDialog, manualDialog, field, demo });
+  experience = window.ZhixianExperience.mount({ $, el, append, icon, button, iconButton, notice, empty, heading, tag, rpc, action, sync, setState, getState: () => currentState, getPage: () => page, go, render, toast, errorText, formatTime, valueText, available, showDialog, manualDialog, field, demo, confirmFollowup: async sid => { await rpc('select_session', { session_id: sid }); await sync(); workbench.actionDialog(); } });
+  workbench = window.ZhixianWorkbench.mount({ $, el, append, button, heading, notice, empty, rpc, sync, getState: () => currentState, getPage: () => page, go, render, toast, errorText, showDialog, field, available, demo, openCatalog: (...args) => experience.openCatalog(...args) });
+  $('#global-sessions').before(button('检索记录', 'search', () => workbench.openSearch(), 'small'));
   connect();
 })();

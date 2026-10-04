@@ -1,11 +1,12 @@
 # PyInstaller onedir: offline OCR models, QtWebEngine, and local UI travel together.
 from PyInstaller.utils.hooks import collect_all
 from pathlib import Path
+import sys
 
 root = Path(SPECPATH)
 datas = [(str(root / 'ui'), 'ui'), (str(root / 'THIRD_PARTY_NOTICES.md'), '.')]
 binaries, hiddenimports = [], []
-for module in ('rapidocr_onnxruntime', 'windows_capture', 'sqlcipher3', 'zstandard'):
+for module in ('rapidocr_onnxruntime', 'sqlcipher3', 'zstandard', *(['windows_capture'] if sys.platform == 'win32' else ['keyring'] if sys.platform == 'darwin' else [])):
     d, b, h = collect_all(module)
     datas += d
     binaries += b
@@ -23,3 +24,9 @@ exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='Zhixian', debug=False
           bootloader_ignore_signals=False, strip=False, upx=False, console=False,
           icon=str(root / 'ui/icon.ico'))
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='Zhixian')
+if sys.platform == 'darwin':
+    from runpy import run_path
+    VERSION = run_path(str(root / 'src/desk/version.py'))['VERSION']
+    app = BUNDLE(coll, name='Zhixian.app', icon=str(root / 'ui/icon.ico'), bundle_identifier='ai.zhixian.desktop',
+                 info_plist={'CFBundleShortVersionString': VERSION, 'CFBundleVersion': VERSION,
+                             'LSMinimumSystemVersion': '13.0', 'NSHighResolutionCapable': True})

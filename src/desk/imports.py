@@ -193,8 +193,11 @@ class ChatLabImporter:
                                 original_id = hashlib.sha256(repr((signature, occurrences[signature])).encode()).hexdigest()
                             message_id = 'impmsg:' + hashlib.sha256(f'{sid}|{original_id}'.encode()).hexdigest()[:24]
                             media_rel = _safe_media_path(path.parent, text, kind)
-                            db.execute('''INSERT OR REPLACE INTO messages(session_id,id,sender,side,text,kind,timestamp,media_rel)
-                                VALUES(?,?,?,?,?,?,?,?)''', (sid, message_id, sender, side, text, kind, timestamp, media_rel))
+                            db.execute('''INSERT INTO messages(session_id,id,sender,side,text,kind,timestamp,media_rel)
+                                VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(session_id,id) DO UPDATE SET
+                                sender=excluded.sender,side=excluded.side,text=excluded.text,kind=excluded.kind,
+                                timestamp=excluded.timestamp,media_rel=excluded.media_rel''',
+                                       (sid, message_id, sender, side, text, kind, timestamp, media_rel))
                             count += 1
                             if progress and count % 3000 == 0:
                                 progress({'files_done': file_index-1, 'files_total': len(files),
@@ -214,6 +217,50 @@ class ChatLabImporter:
                     progress({'files_done': file_index, 'files_total': len(files),
                               'messages': total, 'sessions': len(imported)})
         return {'success': True, 'sessions': len(imported), 'messages': total, 'items': imported}
+
+    def warm_search(self):
+        with self.lock, self._connect() as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='messages_fts'").fetchone():
+                return
+            db.execute('BEGIN IMMEDIATE')
+            db.execute("CREATE VIRTUAL TABLE messages_fts USING fts5(text,content='messages',content_rowid='rowid',tokenize='trigram')")
+            triggers = '''
+                CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages BEGIN
+                    INSERT INTO messages_fts(rowid,text) VALUES(new.rowid,new.text);
+                END;
+                CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages BEGIN
+                    INSERT INTO messages_fts(messages_fts,rowid,text) VALUES('delete',old.rowid,old.text);
+                END;
+                CREATE TRIGGER messages_fts_update AFTER UPDATE ON messages BEGIN
+                    INSERT INTO messages_fts(messages_fts,rowid,text) VALUES('delete',old.rowid,old.text);
+                    INSERT INTO messages_fts(rowid,text) VALUES(new.rowid,new.text);
+                END;
+            '''
+            for trigger in triggers.split('CREATE TRIGGER ')[1:]:
+                db.execute('CREATE TRIGGER ' + trigger.strip())
+            db.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
+
+    def search(self, query, offset=0, limit=20):
+        query = str(query or '').strip()
+        if not 3 <= len(query) <= 100:
+            raise ValueError('正文检索需要 3–100 个字符；联系人名称请使用会话目录搜索。')
+        limit, offset = max(1, min(int(limit), 50)), max(0, int(offset))
+        self.warm_search()
+        phrase = '"' + query.replace('"', '""') + '"'
+        with self.lock, self._connect() as db:
+            deadline = time.monotonic() + 3
+            db.set_progress_handler(lambda: int(time.monotonic() > deadline), 10000)
+            try:
+                rows = db.execute('''SELECT m.*,s.title AS session_title,s.type AS session_type
+                    FROM messages_fts JOIN messages m ON m.rowid=messages_fts.rowid
+                    JOIN sessions s ON s.id=m.session_id WHERE messages_fts MATCH ?
+                    ORDER BY m.timestamp DESC,m.id DESC LIMIT ? OFFSET ?''', (phrase, limit + 1, offset)).fetchall()
+            except sqlite3.OperationalError:
+                raise ValueError('检索未能及时完成，请缩小关键词范围后重试。') from None
+        return {'items': [{**self._message(row), 'session_id': row['session_id'],
+                           'session_title': row['session_title'], 'session_type': row['session_type']} for row in rows[:limit]],
+                'has_more': len(rows) > limit, 'next_cursor': offset + limit if len(rows) > limit else None,
+                'scope': 'imported_archive', 'available': True}
 
     def list_sessions(self, query='', cursor=None, limit=20):
         limit = min(100, max(1, int(limit)))
@@ -243,6 +290,15 @@ class ChatLabImporter:
         result = [self._message(row) for row in reversed(rows[:limit])]
         return {'items': result, 'next_cursor': str(offset+limit) if has_more else None,
                 'has_more': has_more, 'source': 'import', 'scope': 'imported_archive', 'available': True}
+
+    def context(self, sid, mid):
+        with self.lock, self._connect() as db:
+            row = db.execute('SELECT timestamp,id FROM messages WHERE session_id=? AND id=?', (sid, mid)).fetchone()
+            if row is None:
+                raise ValueError('这条消息已不存在，请重新检索。')
+            offset = db.execute('SELECT count(*) FROM messages WHERE session_id=? AND (timestamp>? OR (timestamp=? AND id>?))',
+                                (sid, row['timestamp'], row['timestamp'], row['id'])).fetchone()[0]
+        return self.messages(sid, cursor=str(max(0, offset - 10)), limit=30)
 
     def resolve_media(self, sid, message_id):
         with self.lock, self._connect() as db:

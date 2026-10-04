@@ -5,7 +5,7 @@ numpy==2.5.3
 onnxruntime==1.30.0
 opencv-python==5.0.0.93
 packaging==26.3
-pefile==2024.8.26
+pefile==2024.8.26; sys_platform == 'win32'
 pillow==12.3.0
 protobuf==7.36.2
 pyclipper==1.4.0
@@ -14,7 +14,7 @@ pyinstaller-hooks-contrib==2026.7
 PySide6==6.11.2
 PySide6_Addons==6.11.2
 PySide6_Essentials==6.11.2
-pywin32-ctypes==0.2.3
+pywin32-ctypes==0.2.3; sys_platform == 'win32'
 PyYAML==6.0.3
 rapidocr-onnxruntime==1.4.4
 setuptools==84.0.0
@@ -23,5 +23,12 @@ shiboken6==6.11.2
 six==1.17.0
 sqlcipher3==0.6.2
 tqdm==4.70.1
-windows-capture==2.0.1
+windows-capture==2.0.1; sys_platform == 'win32'
 zstandard==0.25.0
+keyring==25.6.0; sys_platform == 'darwin'
+importlib_metadata==8.7.0; sys_platform == 'darwin'
+jaraco.classes==3.4.0; sys_platform == 'darwin'
+jaraco.context==6.0.1; sys_platform == 'darwin'
+jaraco.functools==4.3.0; sys_platform == 'darwin'
+more-itertools==10.8.0; sys_platform == 'darwin'
+zipp==3.23.0; sys_platform == 'darwin'

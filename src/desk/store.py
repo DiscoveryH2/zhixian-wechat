@@ -1,4 +1,4 @@
-"""Portable local settings; credentials encrypted for the current Windows user."""
+"""Local settings with Windows DPAPI or macOS Keychain credentials."""
 from __future__ import annotations
 
 import base64
@@ -8,6 +8,7 @@ import os
 import re
 import threading
 import uuid
+import sys
 from pathlib import Path
 from ctypes import wintypes
 
@@ -15,11 +16,13 @@ DEFAULTS = {
     'base_url': 'https://openrouter.ai/api', 'model_name': 'typesafe/jev-1.13',
     'reply_model': '', 'reply_base_url': '', 'relationship': '朋友', 'style': '', 'reply_to': '',
     'auto_analyze': True, 'context_limit': 30, 'save_history': False,
-    'always_on_top': False, 'source': 'ocr', 'weflow_url': 'http://127.0.0.1:5031',
+    'always_on_top': False, 'source': 'ocr' if os.name == 'nt' else 'archive', 'weflow_url': 'http://127.0.0.1:5031',
     'debounce_ms': 1200,
-    'theme': 'night', 'font_scale': 1.0,
+    'theme': 'aurora', 'font_scale': 1.0,
     'vision_model': '', 'vision_base_url': '', 'stt_model': '', 'stt_base_url': '',
     'stt_backend': 'auto', 'stt_local_model': '', 'media_allow_cloud': False,
+    'background_dim': 0.7, 'motion': True, 'intro_enabled': True,
+    'stt_protocol': 'auto',
 }
 SECRETS = ('api_key', 'reply_api_key', 'weflow_token', 'vision_api_key', 'stt_api_key')
 
@@ -80,9 +83,41 @@ class Store:
         self.lock = threading.RLock()
         self.error = ''
         stored = _load(self.directory / 'config.json', {})
+        if not isinstance(stored, dict):
+            stored = {}
+            self.error = '配置文件格式异常，已使用默认配置。'
         self.config = {**DEFAULTS, **{k: v for k, v in stored.items() if k in DEFAULTS}}
+        for key, default in DEFAULTS.items():
+            value = self.config[key]
+            valid = (isinstance(value, bool) if isinstance(default, bool) else
+                     isinstance(value, (int, float)) and not isinstance(value, bool) if isinstance(default, (int, float)) else
+                     isinstance(value, str))
+            if not valid:
+                self.config[key] = default
+                self.error = '部分配置格式异常，已恢复对应默认值。'
+        options = {'theme': ('night', 'paper', 'aurora'), 'source': ('ocr', 'weflow', 'wechat_db', 'auto', 'archive'),
+                   'stt_backend': ('auto', 'local', 'cloud'), 'stt_protocol': ('auto', 'json', 'multipart')}
+        ranges = {'font_scale': (.9, 1.3), 'background_dim': (.3, .9), 'context_limit': (3, 200), 'debounce_ms': (400, 10000)}
+        for key in (*options, *ranges):
+            valid = self.config[key] in options[key] if key in options else ranges[key][0] <= self.config[key] <= ranges[key][1]
+            if not valid:
+                self.config[key] = DEFAULTS[key]
+                self.error = '部分配置超出支持范围，已恢复对应默认值。'
+        if sys.platform == 'darwin' and self.config['source'] in ('ocr', 'wechat_db', 'auto'):
+            self.config['source'] = 'archive'
+            self.error = '已切换到 macOS 归档模式；原生微信读取目前仅支持 Windows。'
         self.secrets = {k: '' for k in SECRETS}
         encrypted = _load(self.directory / 'credentials.json', {})
+        if not isinstance(encrypted, dict):
+            encrypted = {}
+            self.error = '密钥文件格式异常，请重新配置。'
+        if encrypted.get('backend') == 'keychain' and sys.platform == 'darwin':
+            try:
+                from .platforms import keychain_get
+                decoded = json.loads(keychain_get(self.directory))
+                self.secrets.update({k: str(decoded.get(k, '')) for k in SECRETS})
+            except Exception:
+                self.error = '无法访问 macOS 钥匙串，请在设置中重新填写密钥。'
         if encrypted.get('protected'):
             try:
                 decoded = json.loads(_crypt(base64.b64decode(encrypted['protected']), True))
@@ -90,8 +125,10 @@ class Store:
             except Exception:
                 self.error = '已保存的密钥无法解密，请在当前 Windows 用户下重新填写。'
         kb = _load(self.directory / 'knowledge.json', {})
-        self.notes = kb.get('notes', []) if isinstance(kb, dict) else []
-        self.contacts = kb.get('contacts', []) if isinstance(kb, dict) else []
+        self.notes = kb.get('notes', []) if isinstance(kb, dict) and isinstance(kb.get('notes'), list) else []
+        self.contacts = kb.get('contacts', []) if isinstance(kb, dict) and isinstance(kb.get('contacts'), list) else []
+        self.notes = [item for item in self.notes if isinstance(item, dict)]
+        self.contacts = [item for item in self.contacts if isinstance(item, dict)]
 
     def full_config(self):
         with self.lock:
@@ -135,7 +172,7 @@ class Store:
             config['debounce_ms'] = min(10000, max(400, int(config['debounce_ms'])))
             for key in ('auto_analyze', 'save_history', 'always_on_top', 'media_allow_cloud'):
                 config[key] = bool(config[key])
-            if config['theme'] not in ('night', 'paper'):
+            if config['theme'] not in ('night', 'paper', 'aurora'):
                 raise ValueError('不支持的界面风格。')
             try:
                 font_scale = float(config['font_scale'])
@@ -146,17 +183,37 @@ class Store:
             config['font_scale'] = font_scale
             if config['stt_backend'] not in ('auto', 'local', 'cloud'):
                 raise ValueError('语音识别来源配置无效。')
-            if config['source'] not in ('ocr', 'weflow', 'wechat_db', 'auto'):
+            if config['stt_protocol'] not in ('auto', 'json', 'multipart'):
+                raise ValueError('语音接口协议无效。')
+            if config['source'] not in ('ocr', 'weflow', 'wechat_db', 'auto', 'archive'):
                 raise ValueError('不支持的消息来源。')
             for key in SECRETS:
                 if changes.get('clear_' + key):
                     config[key] = ''
             new_secrets = {k: config[k] for k in SECRETS}
             # Encrypt before persisting settings so failure never falls back to plaintext.
-            protected = base64.b64encode(_crypt(json.dumps(new_secrets).encode())).decode()
+            config['background_dim'] = float(config.get('background_dim', .7))
+            if not 0.3 <= config['background_dim'] <= 0.9:
+                raise ValueError('背景遮罩需要在 30% 到 90% 之间。')
+            for key in ('motion', 'intro_enabled'):
+                config[key] = bool(config[key])
+            credential_record = None
+            if sys.platform == 'darwin':
+                from .platforms import keychain_set
+                try:
+                    keychain_set(self.directory, json.dumps(new_secrets))
+                except Exception:
+                    raise RuntimeError('无法保存到 macOS 钥匙串；配置未保存，请允许钥匙串访问。') from None
+                credential_record = {'version': 1, 'backend': 'keychain'}
+            elif os.name == 'nt':
+                protected = base64.b64encode(_crypt(json.dumps(new_secrets).encode())).decode()
+                credential_record = {'version': 1, 'protected': protected}
+            elif changes.get('api_key') or any(changes.get(k) for k in SECRETS):
+                raise RuntimeError('此平台暂不支持持久保存密钥；桌面发行版支持 Windows 和 macOS。')
             self.config = {k: config[k] for k in DEFAULTS}
             self.secrets = new_secrets
-            _atomic(self.directory / 'credentials.json', {'version': 1, 'protected': protected})
+            if credential_record is not None:
+                _atomic(self.directory / 'credentials.json', credential_record)
             _atomic(self.directory / 'config.json', self.config)
             if not self.config['save_history']:
                 (self.directory / 'history.json').unlink(missing_ok=True)

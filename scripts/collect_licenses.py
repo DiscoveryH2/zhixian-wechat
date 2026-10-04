@@ -6,8 +6,14 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--output', default=str(Path(__file__).resolve().parents[1] / 'outputs/build/Zhixian/licenses/runtime'))
 root = Path(parser.parse_args().output)
 for name in ('PySide6', 'PySide6_Essentials', 'PySide6_Addons', 'shiboken6', 'numpy',
-             'onnxruntime', 'rapidocr-onnxruntime', 'windows-capture', 'pillow'):
-    distribution = metadata.distribution(name)
+             'onnxruntime', 'rapidocr-onnxruntime', 'windows-capture', 'pillow', 'sqlcipher3', 'zstandard', 'keyring', 'importlib_metadata', 'zipp',
+             'jaraco.classes', 'jaraco.context', 'jaraco.functools', 'more-itertools'):
+    try:
+        distribution = metadata.distribution(name)
+    except metadata.PackageNotFoundError:
+        if name in ('windows-capture', 'keyring', 'importlib_metadata', 'zipp', 'jaraco.classes', 'jaraco.context', 'jaraco.functools', 'more-itertools'):
+            continue
+        raise
     for item in distribution.files or []:
         text = str(item)
         if any(word in text.lower() for word in ('license', 'copying', 'notice')) and text.endswith(('.txt', '.md', 'LICENSE', 'COPYING', 'NOTICE')):

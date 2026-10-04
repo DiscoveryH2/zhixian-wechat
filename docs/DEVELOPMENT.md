@@ -94,7 +94,7 @@ node --check ui/experience.js
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/build.ps1
-.\.venv\Scripts\python.exe scripts/package_portable.py --input outputs/build/Zhixian --output outputs/Zhixian-1.6.0-Windows.zip
+.\.venv\Scripts\python.exe scripts/package_portable.py --input outputs/build/Zhixian --output outputs/Zhixian-1.7.0-Windows.zip
 ```
 
 构建脚本先运行测试，再使用 PyInstaller 生成 `outputs/build/Zhixian/`，收集上游和运行组件的许可文件。打包脚本从该目录生成便携 ZIP，排除应用个人数据文件。构建目标如果已有用户数据，脚本会拒绝覆盖；可通过 `-OutputDirectory` 选择新的构建目录。
@@ -104,9 +104,18 @@ powershell -ExecutionPolicy Bypass -File scripts/build.ps1
 ## 发布前
 
 1. 运行测试、合成演示界面和打包启动验证。
-2. 检查应用版本、发行文件名与[发行说明](releases/1.6.0.md)一致。
+2. 检查应用版本、发行文件名与[发行说明](releases/1.7.0.md)一致。
 3. 检查 ZIP 清单，确认不含 `data/`、真实聊天、凭据、私人笔记或开发环境。
 4. 保留本项目 LICENSE、上游 LICENSE / NOTICE 和第三方运行组件许可；新增字体等资源也要包含对应许可。
 5. 使用合成数据制作公开截图，说明已验证的环境和仍存在的兼容性限制。
 
 发布和贡献约定见 [CONTRIBUTING.md](../CONTRIBUTING.md)；敏感问题见 [SECURITY.md](../SECURITY.md)。
+
+
+## 跨平台与客户行动
+
+macOS 构建见 [MACOS.md](MACOS.md)。`desk/platforms.py` 描述平台能力与钥匙串适配；`desk/actions.py` 在独立 SQLite 中保存经用户确认的行动，使用 revision 拒绝过期更新。`core/followups.py` 只返回与本次输入 ID 及原文匹配的提案，不解析相对时间、不自动写任务。UI `workbench.js` 管理行动与归档检索。
+
+导入归档使用 FTS5 trigram 索引，首次检索或导入后的后台任务建立索引；消息 upsert 和 FTS 触发器保持重导入一致。正文至少三个字符，联系人名称搜索不受此限制。旧结果通过有界上下文页定位。全库检索当前范围为导入归档，原生数据库目录仍按选择读取历史。
+
+运行 `scripts/smoke_workbench.py` 检查真实 QtWebChannel、行动创建/完成、索引检索、旧原文定位与外观控件。这项检查仅用合成数据和内存测试密钥，不验证 DPAPI/钥匙串持久化或真实发送。两端 CI 分别运行测试、打包自检，再由具有 contents:write 的独立任务发布。

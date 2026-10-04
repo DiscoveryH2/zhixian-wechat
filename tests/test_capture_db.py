@@ -77,6 +77,7 @@ class WechatDBCaptureTests(unittest.TestCase):
         close.assert_called_once()
         reopen.assert_called_once()
 
+    @unittest.skipUnless(sys.platform == 'win32', 'Windows window restoration ABI')
     def test_tray_hidden_window_is_restored_after_sender_check(self):
         class FakeUser32:
             visible = False

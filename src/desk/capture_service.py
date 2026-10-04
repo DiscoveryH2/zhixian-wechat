@@ -10,6 +10,7 @@ from contextlib import contextmanager
 import ctypes
 import json
 import os
+import sys
 from pathlib import Path
 import queue
 import re
@@ -173,6 +174,10 @@ class CaptureService:
             self._thread.start()
 
     def start(self, config):
+        if (config or {}).get('source') == 'archive':
+            raise RuntimeError('归档模式通过全局会话导入和选择记录，无需开始窗口观察。')
+        if sys.platform == 'darwin' and (config or {}).get('source') != 'weflow' and self._db_source_factory is None:
+            raise RuntimeError('此平台支持导入记录与 WeFlow；微信窗口捕获和本机数据库观察目前仅支持 Windows。')
         with self._lock:
             if not self._wanted.is_set():
                 self._sidebar_signatures.clear()
@@ -217,6 +222,11 @@ class CaptureService:
         return {"success": True}
 
     def one_shot(self, config=None):
+        selected = config if config is not None else self._config
+        if selected.get('source') == 'archive':
+            raise RuntimeError('归档模式请从全局会话选择已导入记录。')
+        if sys.platform == 'darwin' and selected.get('source') != 'weflow' and self._db_source_factory is None:
+            raise RuntimeError('macOS 暂不支持微信窗口或本机数据库读取，请导入记录。')
         if config is not None:
             with self._lock:
                 self._config = dict(config)
