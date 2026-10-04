@@ -6,7 +6,7 @@ import platform
 import subprocess
 import sys
 
-from package_portable import CHUNK_SIZE, SCAN_OVERLAP, _check_content
+from package_portable import CHUNK_SIZE, SCAN_OVERLAP, _check_content, _safe_name
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from desk.version import VERSION
@@ -18,8 +18,9 @@ def audit_bundle(bundle):
         raise ValueError('Missing macOS application executable.')
     for path in bundle.rglob('*'):
         relative = path.relative_to(bundle)
-        if path.name.casefold() in {'data', 'work', 'credentials.json', 'history.json', 'knowledge.json', 'background.jpg', 'send-audit.jsonl', 'auto-reply.json', 'config.json', 'contacts.json', 'notes.json'} or path.suffix.casefold() in {'.db', '.db-wal', '.db-shm', '.sqlite', '.sqlite3', '.sqlite3-wal', '.sqlite3-shm'}:
-            raise ValueError('Application bundle contains private runtime data.')
+        runtime_data = relative.as_posix() in {'Contents/Resources/cv2/data', 'Contents/Frameworks/cv2/data'}
+        if (path.name.casefold() in {'data', 'work', 'credentials.json', 'history.json', 'knowledge.json', 'background.jpg', 'send-audit.jsonl', 'auto-reply.json', 'config.json', 'contacts.json', 'notes.json'} and not runtime_data) or path.suffix.casefold() in {'.db', '.db-wal', '.db-shm', '.sqlite', '.sqlite3', '.sqlite3-wal', '.sqlite3-shm'}:
+            raise ValueError('Application bundle contains private runtime data: ' + _safe_name(relative))
         if path.is_symlink():
             if not path.resolve().is_relative_to(bundle) or not path.exists():
                 raise ValueError('Bundle link points outside the application.')

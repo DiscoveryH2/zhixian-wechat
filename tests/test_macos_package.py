@@ -25,7 +25,13 @@ class MacBundleTests(unittest.TestCase):
     def test_private_database_missing_docs_and_embedded_token_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             bundle, binary, resources = self.make_bundle(Path(directory))
+            (resources / 'cv2/data').mkdir(parents=True)
+            (resources / 'cv2/data/haarcascade_eye.xml').write_text('Synthetic public runtime data')
             audit_bundle(bundle)
+            (resources / 'data').mkdir()
+            with self.assertRaisesRegex(ValueError, 'private runtime'):
+                audit_bundle(bundle)
+            (resources / 'data').rmdir()
             private = resources / 'chatlab-index.sqlite3'
             private.touch()
             with self.assertRaisesRegex(ValueError, 'private runtime'):
