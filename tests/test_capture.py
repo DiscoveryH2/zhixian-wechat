@@ -315,6 +315,7 @@ class CaptureSidebarBaselineTests(unittest.TestCase):
 
 
 class OneShotTests(unittest.TestCase):
+    @patch('desk.capture_service.sys.platform', 'win32')
     def test_one_shot_does_not_enable_continuous_capture(self):
         service = CaptureService(lambda *args: None)
         cap = Mock()

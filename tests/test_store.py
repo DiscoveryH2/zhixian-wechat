@@ -121,9 +121,10 @@ class StoreTests(unittest.TestCase):
 
     def test_dpapi_failure_never_falls_back_to_plaintext_media_keys(self):
         sample = 'synthetic-encryption-failure-never-issued'
-        with patch('desk.store._crypt', side_effect=RuntimeError('Synthetic encryption failure')):
+        with patch('desk.store.sys.platform', 'win32'), patch('desk.store._crypt', side_effect=RuntimeError('Synthetic encryption failure')) as protect:
             with self.assertRaises(RuntimeError):
                 self.store.save_config({'vision_api_key': sample, 'stt_api_key': sample})
+        protect.assert_called_once()
         self.assertEqual(list(Path(self.temp.name).iterdir()), [])
         self.assertFalse(self.store.public_config()['has_vision_api_key'])
         self.assertFalse(self.store.public_config()['has_stt_api_key'])

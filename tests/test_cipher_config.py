@@ -14,7 +14,7 @@ from src.desk.cipher_config import (
 class CipherTalkConfigDiscoveryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.base = Path(self.temp.name)
+        self.base = Path(self.temp.name).resolve()
         self.account_root = self.base / "wechat-data"
         (self.account_root / "db_storage").mkdir(parents=True)
         self.key = "ab" * 32

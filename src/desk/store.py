@@ -205,7 +205,7 @@ class Store:
                 except Exception:
                     raise RuntimeError('无法保存到 macOS 钥匙串；配置未保存，请允许钥匙串访问。') from None
                 credential_record = {'version': 1, 'backend': 'keychain'}
-            elif os.name == 'nt':
+            elif sys.platform == 'win32':
                 protected = base64.b64encode(_crypt(json.dumps(new_secrets).encode())).decode()
                 credential_record = {'version': 1, 'protected': protected}
             elif changes.get('api_key') or any(changes.get(k) for k in SECRETS):
