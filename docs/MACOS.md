@@ -29,4 +29,4 @@ bash scripts/build_macos.sh
 
 产物为 `outputs/build/Zhixian.app` 和带架构名称的 macOS ZIP。构建必须在目标 Mac 架构上运行，不承诺一个包同时适配 Intel 与 Apple Silicon。CI 会运行 macOS 构建、合成测试与打包后自检；本机微信读取和送达不能由这些测试证明。
 
-当前 macOS 包是开发者预览，未配置 Developer ID 签名与 Apple 公证。正式商用分发必须先完成签名、公证、升级与回滚验收；尚未完成时可使用源码运行。不要关闭系统安全机制来把预览包当成正式发行版。
+当前 macOS 包是开发者预览，构建后重新进行本地临时签名并检查资源封装完整性；这不是 Developer ID 签名，也没有 Apple 公证。正式商用分发必须先完成签名、公证、升级与回滚验收；尚未完成时可使用源码运行。不要关闭系统安全机制来把预览包当成正式发行版。

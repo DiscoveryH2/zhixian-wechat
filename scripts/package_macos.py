@@ -51,7 +51,7 @@ def main():
     subprocess.run(['/usr/bin/ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(bundle), str(output)], check=True)
     checksum = hashlib.sha256(output.read_bytes()).hexdigest()
     (output.parent / (output.name + '.sha256')).write_text(f'{checksum}  {output.name}\n')
-    print(json.dumps({'archive': output.name, 'sha256': checksum, 'signed': False}))
+    print(json.dumps({'archive': output.name, 'sha256': checksum, 'developer_id_signed': False, 'ad_hoc_signature': True}))
 
 
 if __name__ == '__main__':
