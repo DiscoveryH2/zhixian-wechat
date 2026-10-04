@@ -148,7 +148,7 @@ class PlatformTests(unittest.TestCase):
             try:
                 with patch('desk.controller.QDesktopServices.openUrl', return_value=True) as opening:
                     self.assertTrue(ctrl.handle('open_data_folder', {})['success'])
-                self.assertEqual(opening.call_args.args[0].toLocalFile(), str(Path(directory).resolve()))
+                self.assertEqual(Path(opening.call_args.args[0].toLocalFile()).resolve(), Path(directory).resolve())
             finally:
                 ctrl.close()
 
