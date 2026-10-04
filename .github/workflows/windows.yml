@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: desktop-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   desktop:
@@ -125,6 +125,8 @@ jobs:
             const fs = require('fs'), path = require('path');
             const version = fs.readFileSync('src/desk/version.py','utf8').match(/VERSION\s*=\s*['"](\d+\.\d+\.\d+)['"]/)[1];
             const tag = `v${version}`, {owner,repo} = context.repo;
+            const latest=(await github.rest.repos.getBranch({owner,repo,branch:'main'})).data.commit.sha;
+            if (latest !== context.sha) { core.info('A newer source revision supersedes this candidate.'); return; }
             const files = fs.readdirSync('outputs').filter(f=>f.endsWith('.zip') || f.endsWith('.sha256') || f === 'SHA256SUMS');
             if (!files.some(f=>f.includes('-Windows.zip')) || !files.some(f=>f.includes('-macOS-') && f.endsWith('.zip'))) throw new Error('Both desktop archives are required');
             const crypto = require('crypto'), checksums = new Map();
@@ -155,4 +157,6 @@ jobs:
               const data=fs.readFileSync(path.join('outputs',name));
               await github.rest.repos.uploadReleaseAsset({owner,repo,release_id:release.id,name,data,headers:{'content-type':name.endsWith('.zip')?'application/zip':'text/plain','content-length':data.length},request:{timeout:600000}});
             }
+            const finalHead=(await github.rest.repos.getBranch({owner,repo,branch:'main'})).data.commit.sha;
+            if (finalHead !== context.sha) { core.info('Source changed during upload; keep this release as a draft.'); return; }
             await github.rest.repos.updateRelease({owner,repo,release_id:release.id,body,draft:false,prerelease:true});
