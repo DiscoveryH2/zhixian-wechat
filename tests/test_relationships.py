@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from concurrent.futures import Future
+from contextlib import closing
 from unittest.mock import patch
 
 from desk.imports import ChatLabImporter
@@ -212,11 +213,12 @@ class RelationshipTests(unittest.TestCase):
 
     def test_schema_upgrade_keeps_v17_history_and_backfills_stable_senders(self):
         legacy=self.root/'legacy'; legacy.mkdir()
-        with sqlite3.connect(legacy/'chatlab-index.sqlite3') as db:
+        with closing(sqlite3.connect(legacy/'chatlab-index.sqlite3')) as db:
             db.executescript('''CREATE TABLE sessions(id TEXT PRIMARY KEY,title TEXT NOT NULL,talker TEXT,type TEXT,source_dir TEXT NOT NULL,latest TEXT,latest_kind TEXT,updated REAL NOT NULL DEFAULT 0,count INTEGER NOT NULL DEFAULT 0,owner_id TEXT NOT NULL DEFAULT '',imported_at REAL NOT NULL DEFAULT 0);
                 CREATE TABLE messages(session_id TEXT NOT NULL,id TEXT NOT NULL,sender TEXT,side TEXT NOT NULL,text TEXT NOT NULL,kind TEXT NOT NULL,timestamp REAL,media_rel TEXT NOT NULL DEFAULT '',PRIMARY KEY(session_id,id));''')
             db.execute("INSERT INTO sessions VALUES('legacy','Synthetic legacy','friend','private','','old','text',1,1,'me',1)")
             db.execute("INSERT INTO messages VALUES('legacy','legacy-msg','friend','other','old','text',1,'')")
+            db.commit()
         migrated=ChatLabImporter(legacy); store=RelationshipStore(migrated)
         self.assertEqual(store.contact_for_session('legacy')['username'],'friend')
         self.assertEqual(store.statistics(sid='legacy')['messages'],1)
@@ -262,9 +264,10 @@ class TimelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp); (root/'sns').mkdir()
             path=root/'sns/sns.db'
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db:
                 db.execute('CREATE TABLE SnsTimeLine(tid INTEGER,user_name TEXT,content TEXT)')
                 db.executemany('INSERT INTO SnsTimeLine VALUES(?,?,?)',[(3,'friend','<TimelineObject><createTime>1700000000</createTime><contentDesc><![CDATA[合成动态 < & >]]></contentDesc></TimelineObject>'),(2,'friend','<!DOCTYPE x [<!ENTITY z "bad">]><x><contentDesc>&z;</contentDesc></x>'),(1,'other','<TimelineObject><contentDesc>另一条</contentDesc></TimelineObject>')])
+                db.commit()
             original=path.read_bytes()
             reader=WeChatDBSource(root,self_wxid='me')
             page=reader.moments(limit=2)

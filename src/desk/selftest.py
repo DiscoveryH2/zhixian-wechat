@@ -5,6 +5,7 @@ import sys
 import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from contextlib import closing
 
 
 def run_self_test(report_file):
@@ -24,7 +25,7 @@ def run_self_test(report_file):
         import sqlcipher3
         import zstandard
         import PySide6.QtWebEngineWidgets
-        with sqlcipher3.connect(':memory:') as cipher_check:
+        with closing(sqlcipher3.connect(':memory:')) as cipher_check:
             if not cipher_check.execute('PRAGMA cipher_version').fetchone():
                 raise RuntimeError('Bundled SQLCipher driver is unavailable')
         report['checks'].append('sqlcipher3_import')
