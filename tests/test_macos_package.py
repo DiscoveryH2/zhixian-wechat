@@ -1,14 +1,34 @@
 import sys
 import tempfile
 import unittest
+import hashlib
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from package_macos import audit_bundle
+from package_macos import audit_bundle, audit_content
 from package_portable import PackageError
 
 
 class MacBundleTests(unittest.TestCase):
+    def test_public_tls_vector_requires_exact_hash_native_format_and_dependency_path(self):
+        boundary = b'-' * 5
+        public = boundary + b'BEGIN PRIVATE KEY' + boundary + b'\n' + b'QUJD' * 32 + b'\n' + boundary + b'END PRIVATE KEY' + boundary
+        relative = Path('Contents/Frameworks/cv2/__dot__dylibs/libgnutls.30.dylib')
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / 'libgnutls.30.dylib'
+            binary.write_bytes(b'\xcf\xfa\xed\xfe' + public)
+            with patch('package_macos.GNUTLS_KAT_HASHES', {hashlib.sha256(public).hexdigest()}):
+                audit_content(binary, relative)
+                with self.assertRaises(PackageError):
+                    audit_content(binary, Path('Contents/Frameworks/unreviewed.dylib'))
+                binary.write_bytes(public)
+                with self.assertRaises(PackageError):
+                    audit_content(binary, relative)
+                binary.write_bytes(b'\xcf\xfa\xed\xfe' + public + b'\x00' + public.replace(b'QUJD', b'QUJE'))
+                with self.assertRaises(PackageError):
+                    audit_content(binary, relative)
+
     def make_bundle(self, root):
         bundle = root / 'Zhixian.app'
         binary = bundle / 'Contents/MacOS/Zhixian'
