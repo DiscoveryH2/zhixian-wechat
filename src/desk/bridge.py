@@ -12,6 +12,8 @@ class Bridge(QObject):
         self.controller = controller
         controller.stateChanged.connect(lambda data: self.publish('state', data))
         controller.toast.connect(lambda message, level: self.publish('toast', {'message': message, 'level': level}))
+        controller.workAgentProgress.connect(lambda sid, phase: self.publish('work_agent_progress',
+            {'session_id': sid, 'phase': phase}))
 
     def publish(self, kind, data):
         self.event.emit(json.dumps({'type': kind, 'data': data}, ensure_ascii=False))

@@ -40,6 +40,8 @@ Source and upstream license/NOTICE snapshots are kept under `vendor/jev-chat-jar
 
 Python (PSF), PySide6 / Qt (LGPLv3 or commercial), RapidOCR (Apache-2.0), ONNX Runtime (MIT), NumPy (BSD), Windows Capture (MIT), Pillow (HPND), and their transitive dependencies retain their respective licenses. Qt libraries are dynamically linked and are distributed as replaceable files in this application directory or macOS bundle. Corresponding upstream source is available from https://code.qt.io/cgit/pyside/pyside-setup.git/ and https://code.qt.io/cgit/qt/ . Installed package metadata and license files are preserved where provided by packaging hooks.
 
+Work Agent 的 PDF 文字提取使用 `pypdf`（BSD-3-Clause，https://github.com/py-pdf/pypdf）。打包时保留其许可文件；扫描版 PDF 不会被误写为已有可读取文字。
+
 WeFlow integration uses its local documented HTTP interface. No CipherTalk or WeFlow database-key extraction binaries are redistributed by this application.
 
 The optional local WeChat database reader uses `sqlcipher3` (Python binding: zlib/libpng-style license in its distributed LICENSE; PyPI metadata: MIT) and SQLCipher (BSD-3-Clause). Source: https://github.com/coleifer/sqlcipher3 and https://github.com/sqlcipher/sqlcipher . The adapter studies CipherTalk's published database schema but does not copy its CC-BY-NC-SA source or bundle its proprietary DLLs. CipherTalk configuration is read only on the current PC. Its database key is kept in memory and is never written to Zhixian settings or a plaintext database mirror.

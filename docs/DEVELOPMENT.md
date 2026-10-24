@@ -20,8 +20,8 @@ py -3.12 -m venv .venv
 ```text
 src/
   main.py                 Windows 桌面壳、托盘与启动参数
-  desk/                   控制器、数据存储、界面桥接、消息源
-  core/                   Jev 判断、回复生成、协议与模型路由
+  desk/                   控制器、数据存储、Work Agent 任务、界面桥接、消息源
+  core/                   Jev 判断、Work Agent 工具循环、回复生成与模型路由
   app/                    Windows 捕获、OCR、安全粘贴与已核验发送
 ui/                       本地 HTML、CSS、JavaScript 和界面资源
 tests/                    单元测试、合成 OCR 和模拟服务测试
@@ -33,6 +33,8 @@ docs/                     公开文档与合成演示截图
 `data/` 是个人运行数据；`work/`、`outputs/` 和 `.venv/` 是本机构建或开发产物。它们不应随源码发布。
 
 `src/core/agent.py` 实现独立的知弦 Agent 巡检运行时；`Controller.handle('run_agent')` 只接收用户明确选定的会话 ID，按需读取最近消息页，再把有界快照交给 `ModelTasks` 的隔离子进程。Agent 工具清单是静态允许列表，不接受模型或聊天文本发出的任意函数名；没有发送工具。输出中的证据必须绑定本次输入的真实消息 ID，模型服务失败时保留人工复核状态。开发和测试均使用合成聊天，不能把数据库只读测试当成真实自动发送验证。
+
+本地 1.7.0-dev 的 Work Agent 与上述巡检分开：`src/desk/work_agent_store.py` 管理每个任务的对话、材料和成果；`src/core/work_agent.py` 通过用户配置的 Chat Completions 模型执行有调用次数限制的 `list_materials` / `search_materials` / `read_material` / `write_artifact` 工具。`Controller.handle('work_agent_*')` 在本机选择文件、校验任务归属、提交隔离模型任务，并在模型返回后再次验证成果才保存。源码层次图和数据流见[架构说明](ARCHITECTURE.md)。Work Agent 没有任意文件读取、终端或微信发送权限。
 
 ## 不接触真实聊天的开发方式
 
@@ -83,6 +85,8 @@ node --check ui/experience.js
 ```
 
 单元测试覆盖模型协议、路由和错误处理、消息方向和去重、安全回填拒绝、存储及会话状态；合成 OCR 测试使用本机离线模型识别生成的中文图像。`smoke_bridge.py` 通过本机模拟接口检查 QtWebChannel 到后端的完整链路。
+
+Work Agent 的回归须使用合成文档/图片和本机模拟 Chat Completions 接口，覆盖多轮上下文、中文材料检索、图片输入、每一轮工具调用后的上下文预算、成果 UTF-8 字节及路径限制、停止任务后不提交迟到结果和恢复输入、Key 不进入界面状态和任务文件。PDF 文字提取由 `pypdf` 完成；扫描版 PDF 目前没有 OCR，必须明确提示用户。
 
 自动回复测试应优先使用合成会话、虚拟时钟和模拟输入框。发送路径必须在按键之前重新确认当前可见目标、最新来信、输入框为空且聚焦、以及填入文本与带披露后缀的预期草稿一致；不能通过屏幕外切换或 WeFlow 发送接口发送。真实微信验证需单独记录为真实窗口测试，合成测试不代表真实送达。
 

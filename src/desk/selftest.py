@@ -1,5 +1,6 @@
 """Portable-build diagnostic using only synthetic input and localhost HTTP."""
 import json
+import io
 import threading
 import sys
 import tempfile
@@ -24,6 +25,7 @@ def run_self_test(report_file):
             report['checks'].append('keychain_backend_import')
         import sqlcipher3
         import zstandard
+        from pypdf import PdfReader, PdfWriter
         import PySide6.QtWebEngineWidgets
         with closing(sqlcipher3.connect(':memory:')) as cipher_check:
             if not cipher_check.execute('PRAGMA cipher_version').fetchone():
@@ -32,6 +34,13 @@ def run_self_test(report_file):
         if zstandard.ZstdDecompressor().decompress(zstandard.ZstdCompressor().compress(b'synthetic')) != b'synthetic':
             raise RuntimeError('Bundled Zstandard decoder is unavailable')
         report['checks'].append('zstandard_import')
+        pdf = io.BytesIO()
+        writer = PdfWriter()
+        writer.add_blank_page(width=72, height=72)
+        writer.write(pdf)
+        if len(PdfReader(io.BytesIO(pdf.getvalue())).pages) != 1:
+            raise RuntimeError('Bundled PDF reader is unavailable')
+        report['checks'].append('pypdf_import')
         image = Image.new('RGB', (440, 80), '#f5f5f5')
         draw = ImageDraw.Draw(image)
         assets = Path(sys._MEIPASS) if getattr(sys, 'frozen', False) else Path(__file__).resolve().parents[2]
@@ -45,6 +54,8 @@ def run_self_test(report_file):
                 data = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 if 'questions' in data:
                     value = {'answers': {k: {'type': 'noul', 'noul': 1} for k in data['questions']}}
+                elif data.get('model') == 'synthetic-work':
+                    value = {'choices': [{'message': {'role': 'assistant', 'content': '合成 Work Agent 已完成。'}}]}
                 else:
                     state = json.loads(data['messages'][-1]['content'])
                     record = state['records'][0]
@@ -66,6 +77,14 @@ def run_self_test(report_file):
         if not value['success']:
             raise RuntimeError('Isolated model worker did not complete')
         report['checks'] += ['frozen_model_worker', 'local_typed_http', 'qt_webengine_import']
+        work = tasks.submit('work_turn', {'messages': [
+            {'role': 'user', 'content': '用一句话确认合成任务完成。', 'attachment_ids': []}],
+            'attachments': [], 'config': {
+                'work_base_url': f'http://127.0.0.1:{server.server_port}/v1',
+                'work_model': 'synthetic-work', 'work_api_key': ''}}).result(timeout=25)
+        if work.get('answer') != '合成 Work Agent 已完成。':
+            raise RuntimeError('Isolated Work Agent did not complete')
+        report['checks'] += ['work_agent_model_worker', 'local_chat_http']
         from desk.imports import ChatLabImporter
         from desk.relationships import RelationshipStore
         with tempfile.TemporaryDirectory(prefix='zhixian-synthetic-') as temp:

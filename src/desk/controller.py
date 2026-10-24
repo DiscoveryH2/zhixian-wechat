@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -18,6 +19,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QFileDialog
 
 from .store import Store, _atomic, _load, normalize_title
+from .work_agent_store import WorkAgentStore
 from .auto_reply import AutoReplyGuard
 from .imports import ChatLabImporter
 from .datahub import DataHub
@@ -45,11 +47,18 @@ class Controller(QObject):
     autoSendFinished = Signal(str, object, object)
     catchUpPrepared = Signal(int, str, str, object, object)
     catchUpSent = Signal(int, str, object, object)
+    workAgentProgress = Signal(str, str)
 
     def __init__(self, directory: Path):
         super().__init__()
         from .capture_service import CaptureService
         self.store = Store(directory)
+        self.work_agent = WorkAgentStore(Path(directory) / 'work-agent')
+        self.work_agent_busy = set()
+        self.work_agent_jobs = {}
+        self.work_agent_cancelled = set()
+        self.work_agent_phases = {}
+        self.work_agent_lock = threading.RLock()
         self.imports = ChatLabImporter(directory)
         self.relationships = RelationshipStore(self.imports)
         self.actions = ActionStore(directory)
@@ -1037,6 +1046,90 @@ class Controller(QObject):
             })
         return self.models.submit('run_agent', {'sessions': sessions, 'config': model_config}).result(timeout=185)
 
+    def _work_model_config(self, changes=None):
+        """Give the worker only its own route and one eligible credential."""
+        from core.client import _origin, validate_url
+        full = self.store.merged(changes or {})
+        base = str(full.get('work_base_url') or '').strip()
+        model = str(full.get('work_model') or '').strip()
+        if not base or not model:
+            raise ValueError('请先填写 Work Agent 的 Base URL 和模型名。')
+        key = str(full.get('work_api_key') or '').strip()
+        if not key and _origin(validate_url(base)) == _origin(validate_url(full.get('base_url') or '')):
+            key = str(full.get('api_key') or '').strip()
+        return {'work_base_url': base, 'work_model': model, 'work_api_key': key, 'timeout': 30}
+
+    def _work_turn_task(self, sid, text, attachment_ids, config):
+        self._work_phase(sid, 'reading')
+        prepared = self.work_agent.prepare_turn(sid, text, attachment_ids)
+        with self.work_agent_lock:
+            if sid in self.work_agent_cancelled:
+                raise ValueError('本轮任务已停止。')
+        model_future = self.models.submit('work_turn', {**prepared, 'config': config})
+        with self.work_agent_lock:
+            self.work_agent_jobs[sid] = model_future
+            cancelled = sid in self.work_agent_cancelled
+        if cancelled:
+            self.models.cancel(model_future)
+        self._work_phase(sid, 'model')
+        try:
+            result = model_future.result(timeout=305)
+        except Exception:
+            with self.work_agent_lock:
+                if sid in self.work_agent_cancelled:
+                    raise ValueError('本轮任务已停止。') from None
+            raise
+        finally:
+            with self.work_agent_lock:
+                self.work_agent_jobs.pop(sid, None)
+        with self.work_agent_lock:
+            if sid in self.work_agent_cancelled:
+                raise ValueError('本轮任务已停止。')
+            self.work_agent_phases[sid] = 'saving'
+        self.workAgentProgress.emit(sid, 'saving')
+        session = self.work_agent.commit_turn(sid, text, attachment_ids, result)
+        self._work_phase(sid, 'done')
+        latest = (session.get('messages') or [{}])[-1]
+        new_ids = set(latest.get('artifact_ids') or [])
+        artifacts = [item for item in session.get('artifacts', []) if item.get('id') in new_ids]
+        return {'session': session, 'result': {
+            'answer': str(result.get('answer') or '')[:120000],
+            'artifacts': artifacts, 'sources': result.get('sources') or [],
+            'trace': result.get('trace') or [], 'mode': result.get('mode') or 'direct',
+            'usage': result.get('usage') or {},
+        }}
+
+    def _work_phase(self, sid, phase):
+        with self.work_agent_lock:
+            if sid in self.work_agent_cancelled and phase != 'stopping':
+                return
+            self.work_agent_phases[sid] = phase
+        self.workAgentProgress.emit(sid, phase)
+
+    def _work_attach_task(self, sid, files):
+        return {'attachments': self.work_agent.attach_files(sid, files)}
+
+    def _work_test_task(self, config):
+        result = self.models.submit('work_turn', {'messages': [
+            {'role': 'user', 'content': '请用一句简短中文确认工作模型连接正常。', 'attachment_ids': []}],
+            'attachments': [], 'config': config}).result(timeout=305)
+        if not str(result.get('answer') or '').strip():
+            raise ValueError('工作模型未返回可读文字。')
+        return {'success': True, 'message': '工作模型已连通；测试只发送内置合成文字。'}
+
+    @staticmethod
+    def _work_export_task(source, target):
+        if source.resolve() == target.resolve():
+            return {'success': True}
+        temporary = target.with_name(target.name + '.' + uuid.uuid4().hex + '.tmp')
+        try:
+            with source.open('rb') as reader, temporary.open('xb') as writer:
+                shutil.copyfileobj(reader, writer)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return {'success': True}
+
     def _load_page(self, config, sid, cursor=None, limit=30):
         page = self._session_page_task(config, sid, cursor, limit)
         return page
@@ -1416,6 +1509,92 @@ class Controller(QObject):
                           'reply_model', 'relationship', 'style', 'context_limit', 'timeout')
             model_config = {key: source_config[key] for key in model_keys if key in source_config}
             return self.pool.submit(self._run_agent_task, source_config, model_config, selected)
+        if method == 'work_agent_create':
+            return {'session': self.work_agent.create_session()}
+        if method == 'work_agent_list':
+            return {'sessions': self.work_agent.list_sessions()}
+        if method == 'work_agent_load':
+            return {'session': self.work_agent.get_session(str(params.get('session_id') or ''))}
+        if method == 'work_agent_attach':
+            sid = str(params.get('session_id') or '')
+            self.work_agent.get_session(sid)
+            files, _ = QFileDialog.getOpenFileNames(None, '选择 Work Agent 材料', '',
+                '支持的文件 (*.txt *.md *.csv *.json *.py *.js *.ts *.html *.css *.xml *.pdf *.docx *.xlsx *.pptx *.png *.jpg *.jpeg *.webp);;所有文件 (*)')
+            if not files:
+                return {'cancelled': True, 'attachments': []}
+            if len(files) > 8:
+                raise ValueError('一次最多添加 8 个文件。')
+            future = self.pool.submit(self._work_attach_task, sid, files)
+            return future
+        if method == 'work_agent_turn':
+            sid = str(params.get('session_id') or '')
+            text = str(params.get('text') or '').strip()
+            ids = params.get('attachment_ids') or []
+            if not isinstance(ids, list) or len(ids) > 8 or any(not isinstance(value, str) or len(value) > 128 for value in ids):
+                raise ValueError('附件选择无效。')
+            if len(set(ids)) != len(ids) or len(text) > 12000 or (not text and not ids):
+                raise ValueError('请输入任务内容或选择材料，文字最多 12000 字。')
+            self.work_agent.get_session(sid)
+            config = self._work_model_config()
+            with self.work_agent_lock:
+                if sid in self.work_agent_busy:
+                    raise ValueError('这个任务正在处理上一条消息，请稍候。')
+                self.work_agent_busy.add(sid)
+            try:
+                future = self.pool.submit(self._work_turn_task, sid, text, ids, config)
+            except Exception:
+                with self.work_agent_lock:
+                    self.work_agent_busy.discard(sid)
+                raise
+            def release(_):
+                with self.work_agent_lock:
+                    self.work_agent_busy.discard(sid)
+                    self.work_agent_cancelled.discard(sid)
+                    self.work_agent_jobs.pop(sid, None)
+                    self.work_agent_phases.pop(sid, None)
+            future.add_done_callback(release)
+            return future
+        if method == 'work_agent_cancel':
+            sid = str(params.get('session_id') or '')
+            with self.work_agent_lock:
+                if sid not in self.work_agent_busy:
+                    return {'success': False, 'message': '这个任务当前没有正在运行的回合。'}
+                if self.work_agent_phases.get(sid) in ('saving', 'done'):
+                    return {'success': False, 'message': '结果已进入保存阶段，无法中途停止。'}
+                self.work_agent_cancelled.add(sid)
+                job = self.work_agent_jobs.get(sid)
+            if job:
+                self.models.cancel(job)
+            self._work_phase(sid, 'stopping')
+            return {'success': True}
+        if method == 'work_agent_test':
+            return self.pool.submit(self._work_test_task, self._work_model_config(params.get('config')))
+        if method == 'work_agent_export':
+            sid = str(params.get('session_id') or '')
+            path = self.work_agent.resolve_artifact(sid, str(params.get('artifact_id') or ''))
+            target, _ = QFileDialog.getSaveFileName(None, '导出 Work Agent 成果', path.name, '所有文件 (*)')
+            if not target:
+                return {'cancelled': True}
+            return self.pool.submit(self._work_export_task, path, Path(target))
+        if method == 'work_agent_preview':
+            sid = str(params.get('session_id') or '')
+            artifact_id = str(params.get('artifact_id') or '')
+            path = self.work_agent.resolve_artifact(sid, artifact_id)
+            artifact = next((a for a in self.work_agent.get_session(sid)['artifacts'] if a['id'] == artifact_id), None)
+            if path.stat().st_size > 100000:
+                raise ValueError('成果文件超过预览大小限制，请导出后查看。')
+            try:
+                content = path.read_text(encoding='utf-8')
+            except (OSError, UnicodeError):
+                raise ValueError('暂时无法预览该成果文件。') from None
+            return {'name': artifact['name'] if artifact else '成果文件', 'text': content[:100000]}
+        if method == 'work_agent_delete':
+            sid = str(params.get('session_id') or '')
+            with self.work_agent_lock:
+                if sid in self.work_agent_busy:
+                    raise ValueError('任务仍在运行，请完成后再删除。')
+            self.work_agent.delete_session(sid)
+            return {'success': True}
         if method == 'list_sessions':
             config = self.store.full_config()
             # The worker must not iterate mutable Qt-owned session state.

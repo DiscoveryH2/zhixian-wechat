@@ -35,6 +35,22 @@ class StoreTests(unittest.TestCase):
         self.store.save_config({'clear_api_key': True})
         self.assertFalse(self.store.public_config()['has_api_key'])
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows DPAPI')
+    def test_work_agent_key_is_write_only_and_independently_clearable(self):
+        sample = 'synthetic-test-only'
+        public = self.store.save_config({'work_base_url': 'https://work.example.invalid/v1',
+                                         'work_model': 'custom-model', 'work_api_key': sample})
+        self.assertEqual(public['work_model'], 'custom-model')
+        self.assertTrue(public['has_work_api_key'])
+        self.assertNotIn('work_api_key', public)
+        self.assertNotIn(sample, json.dumps(public))
+        for path in Path(self.temp.name).glob('*.json'):
+            self.assertNotIn(sample.encode(), path.read_bytes())
+        restored = Store(Path(self.temp.name))
+        self.assertEqual(restored.secrets['work_api_key'], sample)
+        self.store.save_config({'clear_work_api_key': True})
+        self.assertFalse(Store(Path(self.temp.name)).public_config()['has_work_api_key'])
+
     def test_history_disabled_by_default(self):
         self.store.save_history([{'id': 'sample'}])
         self.assertFalse((Path(self.temp.name) / 'history.json').exists())

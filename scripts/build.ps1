@@ -18,7 +18,7 @@ if ($gitExecutable) { $runtimePaths += Split-Path -Parent $gitExecutable.Source 
 $env:PATH = $runtimePaths -join ';'
 & $pythonPath -m unittest discover -s tests -v
 if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
-& $pythonPath -m PyInstaller --noconfirm --distpath $buildOutput --workpath work\build Zhixian.spec
+& $pythonPath -m PyInstaller --clean --noconfirm --distpath $buildOutput --workpath work\build Zhixian.spec
 if ($LASTEXITCODE -ne 0) { throw 'Packaging failed.' }
 Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination (Join-Path $appOutput 'README.md')
 Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination (Join-Path $appOutput 'LICENSE')

@@ -156,7 +156,7 @@ def path_policy(path: str) -> str | None:
     p = PurePosixPath(path)
     if path in REVIEWED_ASSETS:
         return None
-    if p.suffix.lower() in TEXT_SUFFIXES or p.name.startswith(("LICENSE", "NOTICE")) or p.name in {".gitignore", ".gitattributes", ".editorconfig", "pre-commit"}:
+    if p.suffix.lower() in TEXT_SUFFIXES or p.name.startswith(("LICENSE", "NOTICE")) or p.name in {".gitignore", ".gitattributes", ".editorconfig", "pre-commit", "pre-push"}:
         return None
     return "unreviewed-binary-or-artifact"
 

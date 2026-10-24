@@ -35,13 +35,16 @@ def _model_job(pipe, kind, payload):
         elif kind == 'chat_persona':
             from core.relationships import chat_persona
             result = chat_persona(**payload)
+        elif kind == 'work_turn':
+            from core.work_agent import run_work_turn
+            result = run_work_turn(**payload)
         else:
             raise ValueError('未识别的模型任务。')
         pipe.send((True, result))
     except Exception as exc:
         config = payload if kind == 'test_connection' else payload.get('config', {})
         error = str(exc) or '模型任务未完成。'
-        for name in ('api_key', 'reply_api_key', 'weflow_token', 'vision_api_key', 'stt_api_key'):
+        for name in ('api_key', 'reply_api_key', 'weflow_token', 'vision_api_key', 'stt_api_key', 'work_api_key'):
             value = config.get(name)
             if value:
                 error = error.replace(value, '[已隐藏]')
@@ -71,7 +74,7 @@ class ModelTasks:
             self.jobs[id(future)] = (process, recv, future)
         def watch():
             try:
-                if not recv.poll(180):
+                if not recv.poll(300 if kind == 'work_turn' else 180):
                     process.terminate()
                     raise RuntimeError('模型任务超时，请检查网络与服务状态。')
                 success, value = recv.recv()
@@ -105,6 +108,19 @@ class ModelTasks:
             self.jobs.clear()
         for process, _, _ in jobs:
             process.join(timeout=.5)
+
+    def cancel(self, future):
+        """Stop one isolated model job without cancelling unrelated requests."""
+        with self.lock:
+            job = self.jobs.get(id(future))
+            if not job:
+                return False
+            process, _, owned = job
+            if not owned.done():
+                owned.cancel()
+            if process.is_alive():
+                process.terminate()
+            return True
 
 
 class HelperTasks:
