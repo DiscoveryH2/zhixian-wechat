@@ -13,6 +13,14 @@
 - 参考用户 fork 的 CipherTalk：核对实际机制与许可证，不能把非商业授权代码直接纳入商用项目。
 - macOS、图片/语音、所有会话选择、数据渐进加载、缓存预热、背景/字体设置、3–5 秒开场已有基础，继续完成真实数据链路。
 
+## 活动检查点：1.9.0（沙箱 E:/zhixian-sandbox，分支 sandbox/integrate，未推送）
+
+- 已合并 work-agent-local；Work Agent 入口恢复为「知弦 Agent」页三标签（工作 Agent / 会话巡检 / 模型设置），状态对象与分诊隔离。
+- 数据库自动回复：游标四元组兼容（verified，真机只读）；发送窗口按尺寸排除隐藏工具窗（verified，真机枚举）；搜索切换会话 + OCR 标题核验（partial，未做真机发送）。
+- 判断阶段 chat_json 适配：模型名不含 jev 即走 Chat Completions JSON（verified，单测 + 合成响应）。
+- macOS：数据库只读来源放开（planned→partial，仅合成测试）；发送仍仅 Windows，后端强制。
+- 版本必须是纯 x.y.z 且存在 docs/releases/<版本>.md，否则 release job 失败。
+
 ## 最新已发布：v1.8.0
 
 - 功能与发行提交/tag：`f926a16bda78f283adb0c08c95ef2c894ba17052`；main 随后仅更新工程记忆与验证事实。

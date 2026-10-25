@@ -8,8 +8,8 @@ import urllib.parse
 
 from .client import ProviderError, Route, _key, _model, post_json, validate_url
 
-MAX_ROUNDS = 4
-MAX_CALLS = 8
+MAX_ROUNDS = 6
+MAX_CALLS = 12
 MAX_ATTACHMENTS = 500
 MAX_TEXT = 100_000
 MAX_ARTIFACTS = 3
@@ -42,6 +42,16 @@ def _route(config):
     else:
         endpoint = url + "/chat/completions"
     return Route(endpoint, _model(config.get("work_model")), _key(config.get("work_api_key"), endpoint), "work")
+
+
+def _reason(exc):
+    """只透传已脱敏的 ProviderError 文案（如 "HTTP 401：API Key 无效"），其它异常给通用说明。"""
+    return str(exc)[:200] if isinstance(exc, ProviderError) and str(exc) else "网络或服务异常，请稍后重试。"
+
+
+def _fallback_worthy(exc):
+    text = str(exc)
+    return any(code in text for code in ("HTTP 400", "HTTP 404", "HTTP 422", "服务返回错误"))
 
 
 def _response_text(resp):
@@ -260,7 +270,8 @@ def run_work_turn(messages: list[dict], attachments: list[dict], config: dict, *
         raise ValueError("messages, attachments, and config must be lists/dict")
     route = _route(config)
     post = post_json_fn or post_json
-    timeout = min(20, max(1, float(config.get("timeout") or 20)))
+    # 推理模型/带图请求常超过 20 秒；单次请求上限与 post_json 一致为 120 秒。
+    timeout = min(120, max(5, float(config.get("timeout") or 60)))
 
     def request(payload):
         if post_json_fn is None:
@@ -324,8 +335,9 @@ def run_work_turn(messages: list[dict], attachments: list[dict], config: dict, *
             resp = request(req)
         except Exception as exc:
             # Providers that reject the function schema can still answer directly.
-            if "HTTP 400" not in str(exc) and "HTTP 422" not in str(exc):
-                raise ProviderError("模型请求失败。") from None
+            # 404/返回 error 字段也常见于"不支持 tools"的兼容网关。
+            if not _fallback_worthy(exc):
+                raise ProviderError("模型请求失败：" + _reason(exc)) from None
             mode = "direct"
             req.pop("tools", None); req.pop("tool_choice", None)
             # Keep retrieved material in the user message, where it is clearly
@@ -342,8 +354,18 @@ def run_work_turn(messages: list[dict], attachments: list[dict], config: dict, *
             req["messages"] = _fit_messages(req["messages"])
             try:
                 resp = request(req)
-            except Exception:
-                raise ProviderError("模型请求失败。") from None
+            except Exception as exc:
+                if not images or not _fallback_worthy(exc):
+                    raise ProviderError("模型请求失败：" + _reason(exc)) from None
+                # 模型不支持图片输入：去掉图片再试一次，并在回答里说明。
+                for m in req["messages"]:
+                    if isinstance(m.get("content"), list):
+                        m["content"] = "".join(p.get("text", "") for p in m["content"] if p.get("type") == "text")
+                trace.append({"tool": "vision_context", "status": "rejected"})
+                try:
+                    resp = request(req)
+                except Exception as exc2:
+                    raise ProviderError("模型请求失败：" + _reason(exc2)) from None
             answer = _response_text(resp)
             trace.append({"tool": "direct_answer", "status": "done"})
             break

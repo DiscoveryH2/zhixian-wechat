@@ -75,7 +75,7 @@ class ModelTasks:
             self.jobs[id(future)] = (process, recv, future)
         def watch():
             try:
-                if not recv.poll(300 if kind == 'work_turn' else 180):
+                if not recv.poll(900 if kind == 'work_turn' else 180):
                     process.terminate()
                     raise RuntimeError('模型任务超时，请检查网络与服务状态。')
                 success, value = recv.recv()

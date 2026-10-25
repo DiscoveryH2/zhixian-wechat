@@ -3,6 +3,7 @@ import json
 import unittest
 
 from src.core.client import ProviderError
+from src.core import work_agent
 from src.core.work_agent import run_work_turn
 
 
@@ -163,7 +164,7 @@ class WorkAgentTests(unittest.TestCase):
     def test_each_round_fits_context_and_keeps_tool_call_pairs(self):
         seen = []
         queue = []
-        for turn in range(4):
+        for turn in range(work_agent.MAX_ROUNDS):
             queue.append(response(calls=[call("read_material", {"id": "large", "offset": 0, "limit": 6000}, f"c{turn}a"),
                                          call("read_material", {"id": "large", "offset": 1, "limit": 6000}, f"c{turn}b")]))
         def post(route, payload, timeout):
@@ -183,7 +184,7 @@ class WorkAgentTests(unittest.TestCase):
             return queue.pop(0)
         run_work_turn([{"role": "user", "content": "read all pages"}],
                       [{"id": "large", "name": "Large", "kind": "text", "text": "x" * 100_000}], self.config, post_json_fn=post)
-        self.assertEqual(len(seen), 4)
+        self.assertEqual(len(seen), work_agent.MAX_ROUNDS)
         self.assertTrue(any(reply_count for _, reply_count in seen[1:]))
 
     def test_large_write_arguments_are_previewed_in_next_request(self):

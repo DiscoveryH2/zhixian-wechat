@@ -336,7 +336,7 @@ class TransportTests(unittest.TestCase):
             with self.assertRaises(ProviderError) as error:
                 post_json(Route("https://example.com/api", "model", "key"), {}, timeout=200, retries=1)
         self.assertEqual(len(opener.requests), 2)
-        self.assertEqual(opener.requests[0][2], 60)
+        self.assertEqual(opener.requests[0][2], 120)
         self.assertNotIn("test-secret-value", str(error.exception))
 
     def test_actual_loopback_http_request_and_native_response(self):

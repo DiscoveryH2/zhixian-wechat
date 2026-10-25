@@ -244,7 +244,7 @@ def post_json(route: Route, payload: dict, timeout: float = 20.0, retries: int =
     if route.mode == "chat_json" and "questions" in payload:
         return _decide_via_chat(route, payload, timeout, retries)
     try:
-        timeout = max(1.0, min(float(timeout), 60.0))
+        timeout = max(1.0, min(float(timeout), 120.0))
         retries = max(0, min(int(retries), 2))
         if not math.isfinite(timeout):
             timeout = 20.0

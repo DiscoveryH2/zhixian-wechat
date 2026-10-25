@@ -1074,12 +1074,22 @@ class Controller(QObject):
         full = self.store.merged(changes or {})
         base = str(full.get('work_base_url') or '').strip()
         model = str(full.get('work_model') or '').strip()
+        key = str(full.get('work_api_key') or '').strip()
+        # 未单独配置 Work 模型时，直接复用主模型（OpenAI 兼容），做到"三项配置全链路可用"。
+        from core.client import resolve_decision
+        from .store import DEFAULTS
+        try:
+            main = resolve_decision(full)
+        except Exception:
+            main = None
+        if (main is not None and main.mode == 'chat_json' and not key
+                and base == DEFAULTS['work_base_url'] and model == DEFAULTS['work_model']):
+            return {'work_base_url': main.url, 'work_model': main.model, 'work_api_key': main.key, 'timeout': 60}
         if not base or not model:
             raise ValueError('请先填写 Work Agent 的 Base URL 和模型名。')
-        key = str(full.get('work_api_key') or '').strip()
         if not key and _origin(validate_url(base)) == _origin(validate_url(full.get('base_url') or '')):
             key = str(full.get('api_key') or '').strip()
-        return {'work_base_url': base, 'work_model': model, 'work_api_key': key, 'timeout': 30}
+        return {'work_base_url': base, 'work_model': model, 'work_api_key': key, 'timeout': 60}
 
     def _work_turn_task(self, sid, text, attachment_ids, config):
         self._work_phase(sid, 'reading')
@@ -1095,7 +1105,7 @@ class Controller(QObject):
             self.models.cancel(model_future)
         self._work_phase(sid, 'model')
         try:
-            result = model_future.result(timeout=305)
+            result = model_future.result(timeout=905)
         except Exception:
             with self.work_agent_lock:
                 if sid in self.work_agent_cancelled:
