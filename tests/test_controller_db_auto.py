@@ -16,6 +16,21 @@ APP = QApplication.instance() or QApplication([])
 
 
 class ControllerDBAutoTests(unittest.TestCase):
+    def test_model_failure_pauses_only_after_three_consecutive_errors(self):
+        with tempfile.TemporaryDirectory() as temp, patch("desk.capture_service.CaptureService"):
+            ctrl = Controller(Path(temp))
+            try:
+                ctrl.auto_policy['enabled'] = True
+                ctrl.sessions['synthetic@chatroom'] = {'id': 'synthetic@chatroom', 'title': '合成群', 'messages': []}
+                for attempt in range(3):
+                    ctrl.auto_running_trigger = {'session_id': 'synthetic@chatroom', 'message': {'id': 'm'}}
+                    ctrl._on_analysis('synthetic@chatroom', ctrl.revision, '', None, '模型请求超时，请稍后重试。')
+                    # 前两次只记录并继续监听，第三次连续失败才暂停。
+                    self.assertEqual(ctrl.auto_paused, attempt == 2)
+                self.assertIn('模型请求超时', ctrl.auto_recent[-1]['reason'])
+            finally:
+                ctrl.close()
+
     def test_safe_database_send_error_is_visible_and_pauses(self):
         with tempfile.TemporaryDirectory() as temp, patch("desk.capture_service.CaptureService"):
             ctrl = Controller(Path(temp))

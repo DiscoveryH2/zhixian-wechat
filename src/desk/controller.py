@@ -2271,7 +2271,7 @@ class Controller(QObject):
                         self.auto_paused = True
                         self.auto_detail = '模型分析已连续 3 次失败，自动回复已暂停。'
                     else:
-                        self.auto_detail = f'模型分析失败（连续 {self.auto_failures}/3），继续监听。
+                        self.auto_detail = f'模型分析失败（连续 {self.auto_failures}/3），继续监听。'
             elif self.fingerprint(self.sessions[ident]) == fingerprint:
                 self.status.update(analysis='idle', last_error='')
                 if auto_trigger:
