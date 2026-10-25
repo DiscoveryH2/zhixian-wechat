@@ -1,0 +1,138 @@
+/*
+ * 知弦视觉层「墨玉」（1.9.0，2026-10-25）
+ * 作用：统一默认深色主题 aurora 的配色与组件规则，最后加载，只覆盖不改结构。
+ * 原则：近黑墨绿底；唯一强调色玉绿（与 logo 一致）；黄铜只用于"最佳/重点"；
+ *       面板靠明度分层而非描边；文字对比度 ≥ WCAG AA。
+ * 主题外的通用修正（导航不折行、toast）对所有主题生效。
+ */
+
+/* ---------- 通用修正（所有主题） ---------- */
+.nav-button span { white-space: nowrap; font-size: 11px; letter-spacing: .2px; }
+.toast { border-radius: 12px; box-shadow: 0 12px 32px rgb(0 0 0 / .28); }
+
+/* ---------- 「墨玉」调色板 ---------- */
+html[data-theme="aurora"] {
+  --ink-0: #0c1210;   /* 窗口底 */
+  --ink-1: #121a17;   /* 面板 */
+  --ink-2: #18221e;   /* 面板内层 / 输入框 */
+  --ink-3: #1f2b26;   /* 气泡 / 悬停 */
+  --hair: rgb(214 235 225 / .07);
+  --hair-strong: rgb(214 235 225 / .13);
+  --jade: #6fcfa6;
+  --jade-soft: rgb(111 207 166 / .12);
+  --brass: #d9b76f;
+  --text: #e6eee9; --muted: #96a59d; --faint: #6f7d76;
+  --accent: #6fcfa6; --accent-dark: #4fae87; --line: var(--hair);
+  --scene-ink: var(--text); --scene-muted: var(--muted); --scene-line: var(--hair);
+  --scene-card: var(--ink-1); --scene-soft: var(--ink-2); --scene-accent: var(--jade);
+  --work-ink: var(--text); --work-muted: var(--muted); --work-line: var(--hair);
+  --radius: 16px;
+  background: var(--ink-0);
+}
+html[data-theme="aurora"] .app-shell {
+  background:
+    radial-gradient(900px 520px at 88% -8%, rgb(111 207 166 / .09), transparent 60%),
+    radial-gradient(700px 480px at -5% 105%, rgb(217 183 111 / .05), transparent 60%),
+    var(--ink-0);
+}
+html[data-theme="aurora"].has-scene-background .app-shell { background: rgb(12 18 16 / var(--background-dim)); }
+
+/* 骨架：侧栏 / 顶栏 / 底栏融入底色，只留一条细分隔 */
+html[data-theme="aurora"] :is(.rail, .topbar, .app-footer) { background: rgb(12 18 16 / .72); border-color: var(--hair); color: var(--muted); backdrop-filter: blur(14px); }
+html[data-theme="aurora"] .nav-button { color: var(--faint); border-radius: 12px; }
+html[data-theme="aurora"] .nav-button:hover { color: var(--text); background: rgb(255 255 255 / .03); }
+html[data-theme="aurora"] .nav-button.active { color: var(--jade); background: var(--jade-soft); box-shadow: none; border-color: transparent; }
+html[data-theme="aurora"] .rail-version { color: var(--faint); }
+
+/* 面板：靠明度分层，细边 + 柔和投影 */
+html[data-theme="aurora"] :is(.panel, .reply-card, .item-card, .catalog-dialog, .dialog, .welcome-form) {
+  background: var(--ink-1); border: 1px solid var(--hair); color: var(--text);
+  box-shadow: 0 1px 0 rgb(255 255 255 / .025) inset, 0 18px 40px -24px rgb(0 0 0 / .6);
+}
+html[data-theme="aurora"] :is(.panel-top, .chat-bottom) { background: transparent; border-color: var(--hair); }
+html[data-theme="aurora"] :is(.insight-item, .notice, .moment-comment, .moment-advice, .auto-reply-settings, .auto-reply-catchup, .auto-reply-status, .agent-mission, .agent-selection, .source-strip) {
+  background: var(--ink-2); border-color: var(--hair); color: var(--text);
+}
+
+/* 文字层级 */
+html[data-theme="aurora"] :is(h1, h2, h3, h4, .product-name, .session-name) { color: var(--text); font-weight: 600; }
+html[data-theme="aurora"] h1 { letter-spacing: -.4px; }
+html[data-theme="aurora"] .eyebrow { color: var(--jade); opacity: .85; letter-spacing: 2px; }
+html[data-theme="aurora"] :is(.page-subtitle, .field-hint, .section-description, .form-description, .agent-reason, .agent-safe-note, .reply-footer-hint, .subtle-caption, .capture-hint) { color: var(--muted); }
+html[data-theme="aurora"] :is(.message-meta, .message-meta .sender, .timestamp, .reply-reason, .insight-item .label) { color: var(--faint); }
+html[data-theme="aurora"] .product-subtitle { color: var(--muted); }
+
+/* 按钮：默认幽灵态，主按钮玉绿实心，次按钮玉绿浅底 */
+html[data-theme="aurora"] .btn { background: transparent; color: #cddad3; border: 1px solid var(--hair-strong); }
+html[data-theme="aurora"] .btn:hover:not(:disabled) { background: rgb(255 255 255 / .04); border-color: rgb(111 207 166 / .4); transform: none; }
+html[data-theme="aurora"] .btn.primary { background: var(--jade); border-color: var(--jade); color: #0b231a; font-weight: 600; }
+html[data-theme="aurora"] .btn.primary:hover:not(:disabled) { background: #86dcb7; }
+html[data-theme="aurora"] .btn.subtle { background: var(--jade-soft); border-color: transparent; color: var(--jade); }
+html[data-theme="aurora"] .btn.ghost { border-color: transparent; color: var(--muted); }
+html[data-theme="aurora"] .btn.danger { color: #f0a08d; border-color: rgb(240 160 141 / .3); }
+html[data-theme="aurora"] .btn:disabled { opacity: .45; }
+
+/* 输入 */
+html[data-theme="aurora"] :is(.input, input, textarea, select, .catalog-search, .reading-preview) { background: var(--ink-2); color: var(--text); border: 1px solid var(--hair-strong); }
+html[data-theme="aurora"] :is(.input, input, textarea, select):focus { border-color: rgb(111 207 166 / .55); box-shadow: 0 0 0 3px rgb(111 207 166 / .12); outline: none; }
+html[data-theme="aurora"] ::placeholder { color: var(--faint); }
+
+/* 聊天气泡：对方中性，自己玉绿暗调 */
+html[data-theme="aurora"] :is(.message-bubble, .bubble, .media-message) { background: var(--ink-3); color: var(--text); border: 1px solid var(--hair); }
+html[data-theme="aurora"] .message.me :is(.message-bubble, .bubble) { background: #1d3a2f; border-color: rgb(111 207 166 / .16); color: #e3f2ea; }
+
+/* 回复候选：最佳用黄铜细线标记，而非整块渐变 */
+html[data-theme="aurora"] .reply-card.best { background: var(--ink-1); border-color: rgb(217 183 111 / .35); box-shadow: inset 3px 0 0 var(--brass), 0 18px 40px -24px rgb(0 0 0 / .6); }
+html[data-theme="aurora"] :is(.tag, .reply-index, .catalog-avatar) { color: var(--brass); background: rgb(217 183 111 / .1); border-color: rgb(217 183 111 / .2); }
+html[data-theme="aurora"] .tag.risk-low { color: var(--jade); background: var(--jade-soft); }
+
+/* 空状态与图标块：去掉米白方块，改为玉绿浅底 */
+html[data-theme="aurora"] :is(.empty-icon, .analysis-emblem, .avatar, .live-label, .recommendation-label) { background: var(--jade-soft); border: 1px solid rgb(111 207 166 / .18); color: var(--jade); }
+html[data-theme="aurora"] .empty h3 { color: var(--text); }
+html[data-theme="aurora"] .empty p { color: var(--muted); }
+
+/* 统计卡：数字高亮，标签克制 */
+html[data-theme="aurora"] .insight-stat strong { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+html[data-theme="aurora"] .insight-stat span { color: var(--muted); opacity: 1; }
+html[data-theme="aurora"] .insight-stat { position: relative; overflow: hidden; }
+html[data-theme="aurora"] .insight-stat::after { content: ""; position: absolute; left: 22px; right: 22px; bottom: 0; height: 2px; background: linear-gradient(90deg, var(--jade), transparent); opacity: .5; }
+
+/* 顶栏状态胶囊：去掉纯白块 */
+html[data-theme="aurora"] .status-chip { background: var(--ink-2); color: var(--muted); border: 1px solid var(--hair-strong); }
+html[data-theme="aurora"] .status-chip.auto-reply-chip { background: var(--jade-soft); color: var(--jade); border-color: rgb(111 207 166 / .25); }
+html[data-theme="aurora"] .status-chip.auto-reply-chip.error { background: rgb(240 160 141 / .1); color: #f0a08d; border-color: rgb(240 160 141 / .25); }
+html[data-theme="aurora"] .keycap { background: transparent; border-color: var(--hair-strong); color: var(--faint); }
+
+/* Toast：深色玻璃 + 左侧色条 */
+html[data-theme="aurora"] .toast { background: rgb(24 34 30 / .94); color: var(--text); border: 1px solid var(--hair-strong); box-shadow: inset 3px 0 0 var(--jade), 0 12px 32px rgb(0 0 0 / .35); backdrop-filter: blur(10px); }
+html[data-theme="aurora"] .toast.error { background: rgb(42 24 20 / .94); color: #f6d5cc; box-shadow: inset 3px 0 0 #f0a08d, 0 12px 32px rgb(0 0 0 / .35); }
+
+/* 工作 Agent */
+html[data-theme="aurora"] :is(.work-sidebar, .work-conversation, .work-settings) { background: var(--ink-1); }
+html[data-theme="aurora"] .work-composer { background: var(--ink-2); border-color: var(--hair-strong); }
+html[data-theme="aurora"] .work-tab.active { color: var(--jade); border-bottom-color: var(--jade); }
+html[data-theme="aurora"] .work-message-user .work-message-content { background: #1d3a2f; border-color: rgb(111 207 166 / .16); color: #e3f2ea; }
+
+/* 外观页主题缩略图同步新配色 */
+.theme-aurora .theme-miniature { background: radial-gradient(circle at 80% 10%, rgb(111 207 166 / .35), transparent 55%), linear-gradient(135deg, #121a17, #0c1210); }
+
+/* 滚动条 */
+html[data-theme="aurora"] * { scrollbar-color: rgb(214 235 225 / .16) transparent; scrollbar-width: thin; }
+html[data-theme="aurora"] .nav-button.active:before { background: var(--jade); }
+html[data-theme="aurora"] .nav-button.active svg { color: var(--jade); }
+html[data-theme="aurora"] :is(.dialog-head, .dialog-footer) { border-color: var(--hair); }
+
+/* ---------- 扫描出的浅色残留（2026-10-25 计算样式扫描） ---------- */
+html[data-theme="aurora"] .product-divider { background: var(--hair-strong); }
+html[data-theme="aurora"] .demo-label { background: rgb(217 183 111 / .1); color: var(--brass); border-color: rgb(217 183 111 / .25); }
+html[data-theme="aurora"] span.tag, html[data-theme="aurora"] span.tag.neutral { background: var(--ink-3); color: var(--muted); border-color: var(--hair-strong); }
+html[data-theme="aurora"] :is(.auto-reply-session-tag, .auto-reply-outcome) { background: var(--ink-3); color: var(--muted); border-color: var(--hair-strong); }
+html[data-theme="aurora"] .auto-reply-outcome.simulated { background: rgb(217 183 111 / .1); color: var(--brass); }
+html[data-theme="aurora"] .auto-reply-status-icon { background: var(--jade-soft); color: var(--jade); border: 1px solid rgb(111 207 166 / .18); }
+html[data-theme="aurora"] :is(.moment-friend-avatar, .contact-avatar) { background: var(--jade-soft); color: var(--jade); border-color: rgb(111 207 166 / .18); }
+html[data-theme="aurora"] :is(.moments-sidebar, .settings-aside) { background: var(--ink-1); border-color: var(--hair); color: var(--text); }
+html[data-theme="aurora"] .switch-track { background: var(--ink-3); }
+html[data-theme="aurora"] :is(.judgment-details, .reply-bottom, .collection-toolbar, .advanced, .advanced-section, .settings-help, .subtle-caption, .action-orbit) { border-color: var(--hair); }
+/* refinement.css 以 !important 写死暗绿，只能同级覆盖 */
+html[data-theme="aurora"] .reply-card .recommendation-label { background: rgb(217 183 111 / .12); color: var(--brass) !important; border-color: rgb(217 183 111 / .25); padding: 2px 7px; border-radius: 6px; }
+html[data-theme="aurora"] .tag:not(.mint):not(.risk) { background: var(--ink-3); color: var(--muted); border-color: var(--hair-strong); }

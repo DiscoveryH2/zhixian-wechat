@@ -488,7 +488,7 @@ window.ZhixianExperience = Object.freeze({
       else if (a.enabled && a.paused) statusActions.append(button('恢复运行', 'play', () => confirmAutoReplyStart(), 'small primary', !available()), button('紧急停止', 'close', () => emergencyStop(), 'small danger', !available()));
       else statusActions.append(button('启动自动回复', 'play', () => confirmAutoReplyStart(), 'small primary', !available() || !a.allowlist?.length));
       liveCard.append(statusIcon, statusCopy, statusActions); root.append(liveCard);
-      root.append(notice(`这项功能会通过微信发送消息，每条自动回复末尾都会附“（以上内容为知弦生成）”。数据库模式可在微信收至托盘时读取新消息；若目标会话原本已打开，发送时会短暂恢复窗口核验标题与输入框，再恢复原状态。不会自动切换到其他聊天。群聊默认只处理明确 @ 你的消息；Jev 仍会判断是否值得回复。`, 'warn'));
+      root.append(notice(`这项功能会通过微信发送消息，每条自动回复末尾都会附“（以上内容为知弦生成）”。数据库模式下微信只需登录，可收至托盘；发送时会短暂唤起窗口、搜索切到目标会话，核验标题与输入框后发送，再恢复原状态并还原你当前的窗口。群聊默认只处理明确 @ 你的消息，回复会称呼提问者且不替你编造经历；模型仍会判断是否值得回复。`, 'warn'));
 
       const currentSession = getState().current_session, permittedSessions = a.allowlist || [], visibleId = currentSession?.id;
       if (!permittedSessions.some(item => item.session_id === catchupSessionId)) catchupSessionId = permittedSessions.find(item => item.session_id === visibleId)?.session_id || permittedSessions[0]?.session_id || '';
@@ -687,7 +687,7 @@ window.ZhixianExperience = Object.freeze({
       const main = el('div', 'appearance-main');
       const themes = el('section', 'panel appearance-section'); themes.append(el('h2', '', '知弦风格'), el('p', 'section-description', '安静的正文，带一点探索的仪式感。'));
       const choices = el('div', 'theme-choices');
-      for (const [theme, label, desc] of [['aurora', '极光', '蓝紫与琥珀 · 深空探索'], ['night', '夜航', '深石墨 · 青碧微光'], ['paper', '纸白', '浅纸色 · 墨绿留白']]) {
+      for (const [theme, label, desc] of [['aurora', '墨玉', '墨绿夜色 · 玉绿与黄铜'], ['night', '夜航', '深石墨 · 青碧微光'], ['paper', '纸白', '浅纸色 · 墨绿留白']]) {
         const b = el('button', `theme-choice theme-${theme}${appearance.theme === theme ? ' selected' : ''}`); b.type = 'button'; b.setAttribute('aria-pressed', String(appearance.theme === theme));
         const miniature = el('span', 'theme-miniature'); for (let i = 0; i < 4; i++) miniature.append(el('i'));
         append(b, miniature, append(el('span', 'theme-choice-copy'), el('b', '', label), el('span', '', desc)), appearance.theme === theme ? icon('check', 17) : null);
