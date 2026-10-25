@@ -136,3 +136,11 @@ html[data-theme="aurora"] :is(.judgment-details, .reply-bottom, .collection-tool
 /* refinement.css 以 !important 写死暗绿，只能同级覆盖 */
 html[data-theme="aurora"] .reply-card .recommendation-label { background: rgb(217 183 111 / .12); color: var(--brass) !important; border-color: rgb(217 183 111 / .25); padding: 2px 7px; border-radius: 6px; }
 html[data-theme="aurora"] .tag:not(.mint):not(.risk) { background: var(--ink-3); color: var(--muted); border-color: var(--hair-strong); }
+
+/* ---------- 开场动画（workbench.css 不分主题写死藏蓝紫，此处统一为墨玉） ---------- */
+html[data-theme="aurora"] .cinema-intro { background: radial-gradient(ellipse at 18% 22%, rgb(111 207 166 / .10), transparent 42%), radial-gradient(ellipse at 84% 78%, rgb(217 183 111 / .07), transparent 46%), var(--ink-0); }
+html[data-theme="aurora"] .intro-center { background: radial-gradient(ellipse, rgb(12 18 16 / .92) 10%, rgb(12 18 16 / .6) 48%, transparent 72%); }
+html[data-theme="aurora"] .intro-string { background: linear-gradient(90deg, transparent, rgb(111 207 166 / .35), rgb(217 183 111 / .6), rgb(111 207 166 / .35), transparent); }
+html[data-theme="aurora"] .intro-orbit { border-color: rgb(111 207 166 / .16); box-shadow: 0 0 55px rgb(111 207 166 / .05); }
+html[data-theme="aurora"] .intro-title { text-shadow: 0 0 50px rgb(111 207 166 / .18); }
+html[data-theme="aurora"] .intro-progress:after { background: linear-gradient(90deg, var(--jade), var(--brass)); }

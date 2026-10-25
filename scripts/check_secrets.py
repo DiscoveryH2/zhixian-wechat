@@ -52,23 +52,21 @@ TEXT_SUFFIXES = frozenset({".py", ".md", ".txt", ".json", ".jsonl", ".yaml", ".y
 MAX_BYTES = 8 * 1024 * 1024
 MAX_REVIEWED_ASSET_BYTES = 32 * 1024 * 1024
 REVIEWED_ASSETS = {
-    "docs/images/personas.png": "530007d1efee924d9fa6083e3c345c33f7e22d4361ed826261b2112942cd1288",
-    "docs/images/insights.png": "abb019fe3f0a5cf5b950a77f5d32387fb9a77029854e063bfd570a5c620ddf1b",
+    "docs/images/personas.png": ("530007d1efee924d9fa6083e3c345c33f7e22d4361ed826261b2112942cd1288", "8dd363278266fcc72052122d4979c0d3fc7784160f72a6403c308f318bbf610f"),
+    "docs/images/insights.png": ("abb019fe3f0a5cf5b950a77f5d32387fb9a77029854e063bfd570a5c620ddf1b", "258648316e41d54947389cd1ee90e9e8d0ae034ebb672a7fa4867d8cb9299578"),
 
     "ui/icon.ico": "5b9f0f1223d1d560ab3348f0cc5a47fc19e4d51b80c1ba9a7e9ee866c4c293f0",
     "ui/icon.png": "9c15e704220a0cf215a0ea5e0135cd4d81f32e6f25fe2f3e62cb2bb9de255486",
     "ui/fonts/NotoSansSC-Variable.ttf": "a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da",
     # Both versions were separately reviewed synthetic renders. Retain the
     # previous hashes because --history also scans the earlier public commit.
-    "docs/images/workspace.png": ("8f1b9d81b18c1b0d9e6ef38a8b58b090b8d1014cfcaf37f891454da979f87bbc",
-                                  "37339b319ef8bf581700bf1d7c78129ef27a42e1e53aa9db41a041530c2f5ea9", "3e3746c8d9bdcc85dfad8e7a700f966f4e90a8d69c89b6f1c256de149208bf86"),
-    "docs/images/compact.png": ("2229a5d60c86fe48b8319f6fdb9c2b76632b4654a88038c6042a71055e88652b",
-                                "2abf4924fd61a710de8f4d2c9b417eddbb639ea68f156ef7715470b6ab175078"),
-    "docs/images/intro.png": ('28e2dd0bed30120175e8caac10192663f1e954a31c97fa85f302dd742e825745', 'a333b5eca80444cdde11c610b5758e07d2a73ba263b7bc664a83c095109482f3'),
-    "docs/images/catalogue.png": "bf9dd39408256b49e128cbdb68a62daf4354ee3e4316ef0e34f75748cb6094dd",
-    "docs/images/moments.png": "b724624feb9313ba726136e17527018ee6f79d2409bdde4eefac5820e87af99e",
-    "docs/images/auto-reply.png": "b38edc44560a8bb9e0f9b8e78aba699923402e90f5013b74b9c90414e52b2d63",
-    "docs/images/agent.png": "f7fbd12aee41c922dc6bcb4c1ccfb517448e73fb91fbeb142ba5464c388eadb0",
+    "docs/images/workspace.png": ("8f1b9d81b18c1b0d9e6ef38a8b58b090b8d1014cfcaf37f891454da979f87bbc", "37339b319ef8bf581700bf1d7c78129ef27a42e1e53aa9db41a041530c2f5ea9", "3e3746c8d9bdcc85dfad8e7a700f966f4e90a8d69c89b6f1c256de149208bf86", "7cb3796bc2bf515b11a2baf80009db393678386ef54abe134d9c9d01a0ae1864"),
+    "docs/images/compact.png": ("2229a5d60c86fe48b8319f6fdb9c2b76632b4654a88038c6042a71055e88652b", "2abf4924fd61a710de8f4d2c9b417eddbb639ea68f156ef7715470b6ab175078", "2ca23c28a7910b7d69d36494995b83300cceb39f38dcecd0668774d00afe10c2"),
+    "docs/images/intro.png": ("28e2dd0bed30120175e8caac10192663f1e954a31c97fa85f302dd742e825745", "a333b5eca80444cdde11c610b5758e07d2a73ba263b7bc664a83c095109482f3", "57684cfbf92d08fffe9c8f3da4c5c63f257edfdb4f7afce8fc1e7ec430258b8b"),
+    "docs/images/catalogue.png": ("bf9dd39408256b49e128cbdb68a62daf4354ee3e4316ef0e34f75748cb6094dd", "72c92642d90b15b717ccb1104e1c51860e156851de6ae72ea71950d6f1c2ba12"),
+    "docs/images/moments.png": ("b724624feb9313ba726136e17527018ee6f79d2409bdde4eefac5820e87af99e", "c4f047d3c4080d8f037515cea9e7a7cb947487f4b4e19fa3e9582702ab9fb382"),
+    "docs/images/auto-reply.png": ("b38edc44560a8bb9e0f9b8e78aba699923402e90f5013b74b9c90414e52b2d63", "77224e1e84a817b2abc37ca9d6562d25398cdb453936ccd353c2fab25c77e5b7"),
+    "docs/images/agent.png": ("f7fbd12aee41c922dc6bcb4c1ccfb517448e73fb91fbeb142ba5464c388eadb0", "a17f004d7cdb3fbb2c4c6246d38dd9eef5f414b30a8e5204e25b1fd1a43310e1"),
     "vendor/jev-chat-windows/docs/icon.ico": "fe7e379a97d323dddc1b3fac66d80fd9113ad1c08b0216d886cd2ba18b6788a9",
     "vendor/jev-chat-windows/docs/ui_home.png": "ef24f248cbe6cb8895a9a363845d857c80410d21c66910c52eea6ab2383ca9aa",
     "vendor/jev-chat-windows/docs/ui_settings.png": "83bc9bf2df279de0a29d908fa488632d2d085cb88b72a668b3458ee93cc303de",
