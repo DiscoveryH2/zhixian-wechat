@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
+import time
 from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable
@@ -18,6 +19,7 @@ from core.backlog import _explicit_mention
 _SHARD = re.compile(r"^message_[0-9]+\.db$", re.IGNORECASE)
 _MSG_TABLE = re.compile(r"^msg_[0-9a-f]{16,64}$", re.IGNORECASE)
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SENDER_PREFIX = re.compile(r"^\s*([A-Za-z0-9_@.-]+):(?!//)\s*\n")
 _MAX_LIMIT = 500
 _MAX_SESSION_LIMIT = 500
 _PLACEHOLDERS = {3: ("image", "[图片]"), 34: ("voice", "[语音]"),
@@ -113,6 +115,7 @@ class WeChatDBSource:
         self.session_db = self._discover_session_db()
         self._session_cache: list[dict[str, Any]] | None = None
         self._cache_fingerprint: tuple[Any, ...] | None = None
+        self._cache_built_at = 0.0
 
     def _discover_message_dbs(self) -> list[Path]:
         directory = self.root / "message"
@@ -250,10 +253,15 @@ class WeChatDBSource:
                                "columns": cols, "name2id": shard["name2id"]})
         self._cache_fingerprint = self._storage_fingerprint()
         self._session_cache = tables
+        self._cache_built_at = time.monotonic()
         return tables
 
     def _storage_fingerprint(self) -> tuple[Any, ...]:
-        """Return path + mtime/size for each main DB and adjacent WAL file."""
+        """Return path + mtime/size for each main DB file.
+
+        WAL 每来一条消息都会变，若计入指纹会导致每次轮询全量重建表映射；
+        新会话的表出现在 WAL 时由 messages() 的未命中重试覆盖。
+        """
         paths = list(self.message_dbs)
         if self.contact_db:
             paths.append(self.contact_db)
@@ -261,13 +269,12 @@ class WeChatDBSource:
         if self.session_db:
             paths.append(self.session_db)
         stats: list[tuple[str, int, int] | tuple[str, None, None]] = []
-        for path in paths:
-            for candidate in (path, Path(str(path) + "-wal")):
-                try:
-                    stat = candidate.stat()
-                    stats.append((str(candidate), stat.st_mtime_ns, stat.st_size))
-                except OSError:
-                    stats.append((str(candidate), None, None))
+        for candidate in paths:
+            try:
+                stat = candidate.stat()
+                stats.append((str(candidate), stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                stats.append((str(candidate), None, None))
         return tuple(stats)
 
     @staticmethod
@@ -450,6 +457,17 @@ class WeChatDBSource:
                  "source": "wechat_db", "historical": True}
                 for row in self.sessions(limit=limit, offset=offset)]
 
+    def _at_me(self, source: Any) -> bool:
+        """按 msgsource 的 <atuserlist> 判断是否 @ 了本账号，比昵称匹配可靠。"""
+        if not self.self_wxid:
+            return False
+        payload = _decode_text_payload(source)
+        match = re.search(r"<atuserlist>(.*?)</atuserlist>", payload or "", re.S)
+        if not match:
+            return False
+        users = re.split(r"[,\s]+", re.sub(r"<!\[CDATA\[|\]\]>", "", match.group(1)))
+        return any(_same_account_identity(user, self.self_wxid) for user in users if user)
+
     def moments(self, limit=100, offset=0):
         """Read cached timeline text without fetching media or mutating WeChat."""
         import xml.etree.ElementTree as ET
@@ -513,6 +531,11 @@ class WeChatDBSource:
             raise WeChatDBError("会话标识无效")
         limit = max(1, min(int(limit), self.max_limit))
         candidates = [item for item in self._session_tables() if item["session_id"] == session_id]
+        if not candidates and time.monotonic() - self._cache_built_at > 10:
+            # 新会话的消息表可能只在 WAL 中，强制重建一次映射；
+            # 10 秒节流避免折叠群等无消息表的会话反复触发全量重建。
+            self._session_cache = None
+            candidates = [item for item in self._session_tables() if item["session_id"] == session_id]
         rows: list[tuple[tuple[int, int, int, str], dict[str, Any]]] = []
         for item in candidates:
             shard = item['db'].name + '|' + item['table']
@@ -525,6 +548,9 @@ class WeChatDBSource:
                 fields.append("sort_seq")
             if "compress_content" in cols:
                 fields.append("compress_content")
+            if "source" in cols:
+                fields.append("source")  # msgsource XML，含 <atuserlist>
+
             send_col = next((col for col in cols if col.lower() in ("is_send", "issend")), None)
             if send_col:
                 fields.append(send_col)
@@ -561,6 +587,12 @@ class WeChatDBSource:
                         sender_id = item["name2id"].get(_safe_int(raw["real_sender_id"]), "") if "real_sender_id" in cols else ""
                         kind, text = _kind(raw["local_type"], raw["message_content"],
                                            raw.get("compress_content"))
+                        if session_id.endswith("@chatroom") and kind == "text":
+                            # 群消息正文带 "wxid_xxx:\n" 发送者前缀（同 CipherTalk stripSenderPrefix）。
+                            prefix = _SENDER_PREFIX.match(text)
+                            if prefix:
+                                sender_id = sender_id or prefix.group(1)
+                                text = text[prefix.end():]
                         sent = _is_send(raw[send_col]) if send_col else None
                         if sent is None:
                             sent = True if _same_account_identity(sender_id, self.self_wxid) else (False if sender_id else None)
@@ -570,7 +602,8 @@ class WeChatDBSource:
                                "timestamp": stamp, "source": "wechat_db", "historical": True,
                                "_cursor": cursor}
                         if session_id.endswith("@chatroom") and kind == "text":
-                            msg["directed_to_me"] = _explicit_mention(text, self.self_display_name)
+                            msg["directed_to_me"] = (self._at_me(raw.get("source"))
+                                                     or _explicit_mention(text, self.self_display_name))
                         rows.append((cursor, msg))
             except Exception as exc:
                 raise WeChatDBError("读取微信消息快照失败") from exc

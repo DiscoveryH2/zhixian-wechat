@@ -21,6 +21,19 @@ def _normalize(text):
     return unicodedata.normalize("NFC", str(text)).replace("\r\n", "\n").replace("\r", "\n")
 
 
+def _same_draft(observed, expected):
+    """OCR 容错比对：NFKC 统一全/半角、去空白后相似度 ≥ 0.9。
+
+    发送前已核验输入框为空，这里只需确认框内就是本次粘贴的文字。
+    """
+    from difflib import SequenceMatcher
+    left = "".join(unicodedata.normalize("NFKC", str(observed)).split())
+    right = "".join(unicodedata.normalize("NFKC", str(expected)).split())
+    if not left or not right:
+        return False
+    return left == right or SequenceMatcher(None, left, right).ratio() >= 0.9
+
+
 def _assert_target(hwnd, expected_window_title, *, require_foreground=True):
     u, _, _ = libraries()
     if not u.IsWindow(hwnd) or not u.IsWindowVisible(hwnd) or u.IsIconic(hwnd):
@@ -108,7 +121,7 @@ def send_verified(hwnd, area, text, *, verify, inspect_composer,
     verify()
     after_fill = _observation(inspect_composer, newer_than=fill_completed,
                                verify=verify)
-    if _normalize(after_fill.get("text", "")) != _normalize(message):
+    if not _same_draft(after_fill.get("text", ""), message):
         raise RuntimeError("输入框草稿与拟发送内容不一致，已取消发送")
 
     # Recheck both target and fresh composer immediately before the key event.
@@ -116,7 +129,7 @@ def send_verified(hwnd, area, text, *, verify, inspect_composer,
     verify()
     final = _observation(inspect_composer, newer_than=fill_completed,
                          verify=verify)
-    if _normalize(final.get("text", "")) != _normalize(message):
+    if not _same_draft(final.get("text", ""), message):
         raise RuntimeError("发送前输入框内容已改变，已取消发送")
     verify()
     _assert_target(hwnd, expected_window_title)

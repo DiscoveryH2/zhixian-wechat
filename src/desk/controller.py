@@ -32,6 +32,17 @@ from .actions import ActionStore
 from .relationships import RelationshipStore
 
 AUTO_DISCLOSURE = '（以上内容为知弦生成）'
+# backlog.prefilter 的拒绝原因 → 自动回复记录里的可读说明
+SKIP_REASONS = {
+    'self_is_last_message': '最后一条已是我发出的消息',
+    'no_prior_self_message': '会话里还没有我发过的消息',
+    'group_not_explicitly_directed': '群消息没有 @我（当前为仅 @我 模式）',
+    'stale_over_7_days': '消息超过 7 天',
+    'future_timestamp': '消息时间异常',
+    'candidate_not_latest_context': '目标消息已不是最新一轮',
+    'ambiguous_model_judgment': '模型判断把握不足',
+    'jev_typed_decision': '模型判断这条消息无需回复',
+}
 
 
 class Controller(QObject):
@@ -108,6 +119,7 @@ class Controller(QObject):
         self.auto_allowlist = [entry for entry in (saved_auto.get('allowlist') or [])
                                if isinstance(entry, dict) and entry.get('session_id') and entry.get('type') in ('private', 'group')][:50]
         self.auto_paused = False
+        self.auto_failures = 0  # 连续发送失败次数，达到 3 才暂停
         self.auto_detail = ('自动回复状态文件无法可靠读取；请重新保存名单并重启应用后再启用。'
                             if self.auto_integrity_error else
                             '默认关闭。选择会话并明确启用后，只回复新收到的消息。')
@@ -338,10 +350,13 @@ class Controller(QObject):
             raise ValueError('自动回复去重或限额状态损坏；请重新保存名单并重启应用后再启用。')
         if params.get('acknowledge_send') is not True:
             raise ValueError('请确认：自动回复会真正发送给所选微信联系人或群聊。')
+        if not capabilities()['send']:
+            # 平台限制必须在后端兜底，不能只靠前端隐藏入口。
+            raise ValueError('当前平台暂不支持自动发送微信消息；可使用实时读取、分析与候选回复。')
         if not self.auto_allowlist:
             raise ValueError('请先选择允许自动回复的实时会话。')
         if not self.store.secrets['api_key']:
-            raise ValueError('请先配置 Jev API Key。')
+            raise ValueError('请先配置模型 API Key。')
         source = self.auto_allowlist[0].get('source')
         if source == 'weflow' and self.store.config['source'] != 'weflow':
             raise ValueError('请先在设置中启用已连接的 WeFlow 消息来源。')
@@ -358,7 +373,9 @@ class Controller(QObject):
         self.auto_policy['session_ids'] = [entry['session_id'] for entry in self.auto_allowlist]
         self.auto_policy['enabled'] = True
         self.auto_paused = False
-        self.auto_detail = ('自动回复已启用；只处理启用之后的新入站文字。数据库模式仍要求目标会话在微信窗口中可唯一核验。'
+        self.auto_failures = 0
+        self.auto_detail = ('自动回复已启用；只处理启用之后的新入站文字。微信只需登录（可收在托盘），'
+                            '发送时会临时唤起窗口、切到目标会话并核验后发送，随后自动收起。'
                             if source == 'wechat_db' else
                             '自动回复已启用；只处理启用之后的新入站文字，发送前还会核验微信窗口和输入框。')
         if self.status['capture'] not in ('live', 'searching'):
@@ -542,21 +559,25 @@ class Controller(QObject):
         result = payload.get('result') if isinstance(payload, dict) else None
         status = result.get('status') if isinstance(result, dict) else None
         if status == 'sent':
+            self.auto_failures = 0
             self._auto_record(sid, 'sent', '已在目标微信会话确认发出消息')
             self.auto_detail = '上一条回复已在目标会话确认；继续等待新消息。'
         elif status == 'sent_unconfirmed':
-            self.auto_paused = True
-            self._auto_record(sid, 'failed', '已按下发送键，但未能确认送达；已暂停，请检查微信')
-            self.auto_detail = '发送结果尚未确认，自动回复已暂停。请检查微信后再启用。'
-        elif isinstance(error, str) and error.startswith('数据库发送核验：'):
-            self.auto_paused = True
-            detail = error.split('：', 1)[1][:160]
-            self._auto_record(sid, 'failed', detail)
-            self.auto_detail = detail + ' 自动回复已暂停。'
+            # 去重已在 claim 时落盘，不会重发；只记录待人工确认，不暂停。
+            self.auto_failures = 0
+            self._auto_record(sid, 'unconfirmed', '已按下发送键，但未在时限内确认送达；请抽空检查微信')
+            self.auto_detail = '上一条回复未能确认送达，继续监听；请抽空检查微信。'
         else:
-            self.auto_paused = True
-            self._auto_record(sid, 'failed', '安全核验或发送失败，已暂停')
-            self.auto_detail = '安全核验未通过，自动回复已暂停。'
+            # 核验失败本身是安全拒发；连续 3 次才暂停，避免一次瞬时失败就停摆。
+            self.auto_failures += 1
+            detail = (error.split('：', 1)[1][:160] if isinstance(error, str) and error.startswith('数据库发送核验：')
+                      else '安全核验或发送失败，本条未发送')
+            self._auto_record(sid, 'failed', detail)
+            if self.auto_failures >= 3:
+                self.auto_paused = True
+                self.auto_detail = detail + ' 已连续 3 次失败，自动回复已暂停。'
+            else:
+                self.auto_detail = detail + f'（连续失败 {self.auto_failures}/3，继续监听）'
         self._save_auto_state()
         self._resume_deferred_auto()
         self.emit()
@@ -609,7 +630,8 @@ class Controller(QObject):
             'messages': session['messages'], 'config': cfg, 'chat_type': trigger['type'],
             'chat_name': session['title'], 'own_display_name': '',
             'current_session_acknowledged': True, 'group_mode': group_mode,
-            'require_prior_self': False if trigger['type'] == 'group' else True}).result(timeout=180)
+            # 新联系人或上下文较短时也应能回复，是否值得回复交给模型判断。
+            'require_prior_self': False}).result(timeout=180)
         if (judged.get('should_reply') is not True or
                 judged.get('target_message_id') != trigger['message']['id']):
             return {'_auto_decision': judged}
@@ -2030,9 +2052,9 @@ class Controller(QObject):
             if self.status['capture'] == 'error':
                 self.status['last_error'] = self.safe_error(data.get('detail') or '采集未完成。')
                 if self.auto_policy['enabled']:
+                    # 瞬时读取失败只作废在途任务，采集恢复 live 后自动继续；不再永久暂停。
                     self._cancel_auto_work()
-                    self.auto_paused = True
-                    self.auto_detail = '微信采集失去可靠状态，自动回复已暂停。'
+                    self.auto_detail = '微信采集暂时中断，已取消在途回复；恢复后自动继续监听。'
             elif self.status['capture'] == 'live':
                 self.status['last_error'] = ''
         elif kind == 'error':
@@ -2130,8 +2152,12 @@ class Controller(QObject):
                     auto_delay = self._auto_observe(session, added[-1], data)
                     if auto_delay is None and self.auto_trigger and self.auto_trigger['session_id'] == ident:
                         self.auto_trigger = None
+                # 只有一个 pending 槽：普通自动分析不得顶掉已就绪的自动回复触发。
+                auto_waiting = (self.auto_trigger is not None and self.pending == self.auto_trigger['session_id']
+                                and self.pending != ident)
                 if (added and added[-1].get('side') == 'other' and cfg['api_key']
-                        and ((cfg['auto_analyze'] and (not historical or initial_allowed)) or auto_delay is not None)):
+                        and ((cfg['auto_analyze'] and (not historical or initial_allowed) and not auto_waiting)
+                             or auto_delay is not None)):
                     self.pending = ident
                     self.pending_manual = False
                     self.timer.start(max(cfg['debounce_ms'], auto_delay or 0))
@@ -2237,8 +2263,10 @@ class Controller(QObject):
                         self.auto_detail = 'Jev 实时回复判断服务暂不可用，自动回复已暂停。'
                         self._auto_record(ident, 'failed', 'Jev 实时回复判断服务不可用')
                     elif judged.get('should_reply') is not True or judged.get('target_message_id') != auto_trigger['message']['id']:
-                        self._auto_record(ident, 'skipped', 'Jev 判断当前来信不需要回复')
-                        self.auto_detail = 'Jev 判断这条新消息无需回复，继续等待。'
+                        # 区分"模型判断无需回复"与本地前置规则拒绝，避免误导。
+                        reason = SKIP_REASONS.get(judged.get('reason'), '模型判断当前来信不需要回复')
+                        self._auto_record(ident, 'skipped', reason)
+                        self.auto_detail = reason + '，继续等待。'
                     else:
                         self.results[ident] = result
                         self.result_fingerprints[ident] = fingerprint

@@ -21,7 +21,7 @@ class FakeWechatDB:
         return {"id": f"fake-{local_id}", "side": side, "sender": "wxid_friend",
                 "text": text, "kind": kind, "timestamp": timestamp,
                 "source": "wechat_db", "historical": True,
-                "_cursor": (local_id, timestamp, local_id)}
+                "_cursor": (local_id, timestamp, local_id, "message_0.db|Msg_synthetic")}
 
     def sessions(self, limit=100, offset=0, query=None):
         return [{"id": self.talker, "name": "合成联系人", "type": "private",
@@ -83,7 +83,16 @@ class WechatDBCaptureTests(unittest.TestCase):
             visible = False
             iconic = False
             def EnumWindows(self, callback, value):
-                callback(123, value)
+                # 真机上微信 4.x 还有两个约 176x199 的隐藏 "Weixin" 工具窗，必须被排除。
+                for hwnd in (123, 456, 789):
+                    callback(hwnd, value)
+            def GetWindowRect(self, hwnd, rect):
+                size = (900, 900) if hwnd == 123 else (176, 199)
+                rect._obj.right, rect._obj.bottom = size
+            def GetForegroundWindow(self):
+                return 0
+            def IsWindow(self, _hwnd):
+                return True
             def IsWindowVisible(self, _hwnd):
                 return self.visible
             def IsIconic(self, _hwnd):

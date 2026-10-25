@@ -34,6 +34,51 @@ def set_clipboard(text):
     raise RuntimeError("剪贴板正在被占用，请稍后重试")
 
 
+def focus_window(hwnd):
+    """把窗口切到前台；返回是否成功。AttachThreadInput 绕过前台锁。"""
+    u, k, _ = libraries()
+    fg = u.GetForegroundWindow()
+    if fg != hwnd:
+        thread_id = u.GetWindowThreadProcessId(fg, None) if fg else 0
+        own = k.GetCurrentThreadId()
+        attached = bool(thread_id and u.AttachThreadInput(own, thread_id, True))
+        try:
+            u.SetForegroundWindow(hwnd)
+        finally:
+            if attached:
+                u.AttachThreadInput(own, thread_id, False)
+        time.sleep(.15)
+    return u.GetForegroundWindow() == hwnd
+
+
+def _chord(*keys):
+    """按下组合键（依序按下、逆序抬起）。"""
+    u, _, _ = libraries()
+    for key in keys:
+        u.keybd_event(key, 0, 0, 0)
+    for key in reversed(keys):
+        u.keybd_event(key, 0, 2, 0)
+
+
+def open_chat_by_search(hwnd, name):
+    """用微信 Ctrl+F 搜索并回车打开首个结果；调用方必须再用 OCR 核验标题。"""
+    if not str(name).strip():
+        raise RuntimeError("目标会话名称为空，无法切换会话")
+    if not focus_window(hwnd):
+        raise RuntimeError("无法将微信切到前台，无法切换会话")
+    _chord(0x11, 0x46)          # Ctrl+F 聚焦搜索框
+    time.sleep(.35)
+    _chord(0x11, 0x41)          # Ctrl+A 清空旧搜索词
+    set_clipboard(str(name).strip())
+    _chord(0x11, 0x56)          # Ctrl+V 粘贴会话名
+    time.sleep(1.2)             # 等待搜索结果刷新
+    u, _, _ = libraries()
+    if u.GetForegroundWindow() != hwnd:
+        raise RuntimeError("焦点已离开微信，已取消切换会话")
+    _chord(0x0D)                # Enter 打开首个结果
+    time.sleep(.8)
+
+
 def fill(hwnd, area, text, verify=None, expected_window_title=None):
     """verify must OCR a recent frame and raise on any changed conversation."""
     if not callable(verify):
@@ -53,18 +98,7 @@ def fill(hwnd, area, text, verify=None, expected_window_title=None):
         return verify()
 
     check()
-    fg = u.GetForegroundWindow()
-    if fg != hwnd:
-        thread_id = u.GetWindowThreadProcessId(fg, None) if fg else 0
-        own = k.GetCurrentThreadId()
-        attached = bool(thread_id and u.AttachThreadInput(own, thread_id, True))
-        try:
-            u.SetForegroundWindow(hwnd)
-        finally:
-            if attached:
-                u.AttachThreadInput(own, thread_id, False)
-        time.sleep(.15)
-    if u.GetForegroundWindow() != hwnd:
+    if not focus_window(hwnd):
         raise RuntimeError("无法确认微信处于前台，已拒绝填入")
     fresh_area = check()
     area = fresh_area or area

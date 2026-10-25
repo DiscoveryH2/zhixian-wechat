@@ -140,6 +140,26 @@ class WeChatDBSourceTests(unittest.TestCase):
         self.assertTrue(prefilter_backlog([latest], chat_type="group", group_mode="mention_only",
             require_prior_self=False, now=8001)["eligible"])
 
+    def test_group_sender_prefix_is_stripped_and_atuserlist_marks_me(self):
+        # 真机群消息正文带 "wxid:\n" 前缀，@我 记录在 source 列的 <atuserlist> 中。
+        path = self.snapshot / "message" / "message_5.db"
+        with closing(sqlite3.connect(path)) as con:
+            con.execute("CREATE TABLE Name2Id(user_name TEXT)")
+            con.execute("INSERT INTO Name2Id(rowid,user_name) VALUES (1,'room2@chatroom')")
+            table = _msg_table("room2@chatroom")
+            con.execute(f'CREATE TABLE "{table}"(local_id INTEGER,sort_seq INTEGER,create_time INTEGER,'
+                        'local_type INTEGER,real_sender_id INTEGER,message_content TEXT,source TEXT)')
+            con.execute(f'INSERT INTO "{table}" VALUES (1,100,1000,1,0,?,?)',
+                        ("wxid_friend:\n合成群发言", "<msgsource><atuserlist><![CDATA[wxid_other,wxid_self]]></atuserlist></msgsource>"))
+            con.execute(f'INSERT INTO "{table}" VALUES (2,200,2000,1,0,?,NULL)', ("wxid_friend:\n没有@我",))
+            con.commit()
+        rows = WeChatDBSource(self.snapshot, self_wxid="wxid_self").messages("room2@chatroom", limit=5)
+        by_text = {row["text"]: row for row in rows}
+        self.assertEqual(set(by_text), {"合成群发言", "没有@我"})
+        self.assertEqual(by_text["合成群发言"]["sender"], "wxid_friend")
+        self.assertTrue(by_text["合成群发言"]["directed_to_me"])
+        self.assertFalse(by_text["没有@我"]["directed_to_me"])
+
     def test_paging_cursor_is_exclusive_and_limit_is_bounded(self):
         source = WeChatDBSource(self.snapshot, max_limit=2)
         first = source.messages("wxid_friend", limit=999)

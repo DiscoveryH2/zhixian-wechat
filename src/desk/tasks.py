@@ -64,7 +64,8 @@ class ModelTasks:
         with self.lock:
             if self.closed:
                 raise RuntimeError('应用正在关闭。')
-            if len(self.jobs) >= 3:
+            # 回复链路（判断/分析）预留 2 个额外槽位，避免被 Work Agent、洞察等长任务挤掉。
+            if len(self.jobs) >= (5 if kind in ('judge_backlog', 'analyze') else 3):
                 raise RuntimeError('已有模型任务正在运行，请稍后再试。')
             recv, send = self.context.Pipe(duplex=False)
             future = Future()

@@ -358,13 +358,13 @@
   function settings() {
     const root = el('section', 'page settings-page'); root.append(heading('模型与偏好', '管理模型连接、消息来源和本地数据。', null));
     const grid = el('div', 'settings-grid'), form = el('form', 'panel settings-form'); form.id = 'config-form'; form.autocomplete = 'off';
-    form.append(el('h2', '', 'Jev 模型连接'), el('p', 'form-description', '日常使用只需配置以下三项。仅选中的上下文与相关背景会发到此 API，本地历史默认关闭。')); primaryFields(form);
+    form.append(el('h2', '', '模型连接'), el('p', 'form-description', '日常使用只需配置以下三项：支持任意 OpenAI 兼容接口（如 deepseek、qwen、gpt），模型名含 jev 时自动走 Jev 判断协议。仅选中的上下文与相关背景会发到此 API，本地历史默认关闭。')); primaryFields(form);
     const advanced = el('details', 'advanced'); advanced.append(el('summary', '', '高级选项'));
     const body = el('div', 'advanced-body'), c = currentState.config;
     const generation = el('section', 'advanced-section'); generation.append(el('h3', '', '候选回复生成（可选）'), el('p', 'field-hint', 'OpenRouter 接入可复用同一密钥，默认用 deepseek/deepseek-v4.1-flash 起草回复。TypeSafe 直连或自定义判断服务需另配生成模型，才能提供候选回复。'));
     generation.append(field('生成模型名称', 'reply_model', c.reply_model, { optional: true, placeholder: '留空：OpenRouter 使用默认回复模型' }), field('生成模型 Base URL', 'reply_base_url', c.reply_base_url, { optional: true, placeholder: '留空：按服务自动匹配' }), field('生成模型 API Key', 'reply_api_key', '', { type: 'password', optional: true, placeholder: c.has_reply_api_key ? '已保存，留空保留' : '留空：仅同服务复用主密钥' }));
     const source = el('section', 'advanced-section'); source.append(el('h3', '', '消息读取'));
-    source.append(field('读取来源', 'source', c.source === 'auto' ? 'ocr' : c.source, { options: [['archive', '主动导入的聊天归档'], ...(currentState.capabilities?.native_capture === false ? [] : [['ocr', '微信可见窗口（本地 OCR）'], ['wechat_db', '本机微信数据库（CipherTalk 已配置账号）']]), ['weflow', '已有 WeFlow 本地服务']] }), el('p', 'field-hint', '数据库来源在微信保持登录、窗口最小化或收至托盘时仍可读取新消息；复用 CipherTalk 已配置账号，数据库密钥不会进入知弦设置。切换会话后会重新建立上下文。'));
+    source.append(field('读取来源', 'source', c.source === 'auto' ? 'ocr' : c.source, { options: [['archive', '主动导入的聊天归档'], ...(currentState.capabilities?.native_capture === false ? [] : [['ocr', '微信可见窗口（本地 OCR）']]), ...(currentState.capabilities?.native_database === false ? [] : [['wechat_db', '本机微信数据库（CipherTalk 已配置账号）']]), ['weflow', '已有 WeFlow 本地服务']] }), el('p', 'field-hint', '数据库来源在微信保持登录、窗口最小化或收至托盘时仍可读取新消息；复用 CipherTalk 已配置账号，数据库密钥不会进入知弦设置。切换会话后会重新建立上下文。'));
     source.append(field('WeFlow 地址', 'weflow_url', c.weflow_url, { optional: true, placeholder: 'http://127.0.0.1:5031' }), field('WeFlow 访问令牌', 'weflow_token', '', { type: 'password', optional: true, placeholder: c.weflow_has_token ? '已保存，留空保留' : '仅当你的服务需要验证时填写' }));
     source.append(button('检查读取来源', 'refresh', async () => { const result = await rpc('refresh_sources'); const sources = Array.isArray(result) ? result : result?.sources; if (sources?.length) toast(sources.map(s => typeof s === 'string' ? s : s.title || s.name || s.source || '已发现来源').join('；')); else toast(typeof result?.message === 'string' ? result.message : '已刷新来源，请检查所选数据源。'); }, 'small', !available()));
     const behavior = el('section', 'advanced-section'); behavior.append(el('h3', '', '分析与表达'));

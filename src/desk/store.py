@@ -104,9 +104,9 @@ class Store:
             if not valid:
                 self.config[key] = DEFAULTS[key]
                 self.error = '部分配置超出支持范围，已恢复对应默认值。'
-        if sys.platform == 'darwin' and self.config['source'] in ('ocr', 'wechat_db', 'auto'):
+        if sys.platform == 'darwin' and self.config['source'] in ('ocr', 'auto'):
             self.config['source'] = 'archive'
-            self.error = '已切换到 macOS 归档模式；原生微信读取目前仅支持 Windows。'
+            self.error = '已切换到 macOS 归档模式；微信窗口 OCR 仅支持 Windows，可改用本机微信数据库来源。'
         self.secrets = {k: '' for k in SECRETS}
         encrypted = _load(self.directory / 'credentials.json', {})
         if not isinstance(encrypted, dict):

@@ -176,8 +176,8 @@ class CaptureService:
     def start(self, config):
         if (config or {}).get('source') == 'archive':
             raise RuntimeError('归档模式通过全局会话导入和选择记录，无需开始窗口观察。')
-        if sys.platform == 'darwin' and (config or {}).get('source') != 'weflow' and self._db_source_factory is None:
-            raise RuntimeError('此平台支持导入记录与 WeFlow；微信窗口捕获和本机数据库观察目前仅支持 Windows。')
+        if sys.platform == 'darwin' and (config or {}).get('source') not in ('weflow', 'wechat_db') and self._db_source_factory is None:
+            raise RuntimeError('此平台支持导入记录、WeFlow 与本机微信数据库；微信窗口 OCR 目前仅支持 Windows。')
         with self._lock:
             if not self._wanted.is_set():
                 self._sidebar_signatures.clear()
@@ -225,8 +225,8 @@ class CaptureService:
         selected = config if config is not None else self._config
         if selected.get('source') == 'archive':
             raise RuntimeError('归档模式请从全局会话选择已导入记录。')
-        if sys.platform == 'darwin' and selected.get('source') != 'weflow' and self._db_source_factory is None:
-            raise RuntimeError('macOS 暂不支持微信窗口或本机数据库读取，请导入记录。')
+        if sys.platform == 'darwin' and selected.get('source') not in ('weflow', 'wechat_db') and self._db_source_factory is None:
+            raise RuntimeError('macOS 暂不支持微信窗口 OCR，请改用本机微信数据库或导入记录。')
         if config is not None:
             with self._lock:
                 self._config = dict(config)
@@ -359,9 +359,10 @@ class CaptureService:
     @staticmethod
     def _db_cursor(message):
         cursor = message.get("_cursor")
-        if isinstance(cursor, (tuple, list)) and len(cursor) == 3:
+        # 真实数据源返回 (sort_seq, create_time, local_id, shard) 四元组；只取前三项排序。
+        if isinstance(cursor, (tuple, list)) and len(cursor) in (3, 4):
             try:
-                return tuple(int(value or 0) for value in cursor)
+                return tuple(int(value or 0) for value in cursor[:3])
             except (TypeError, ValueError, OverflowError):
                 return None
         return None
@@ -462,6 +463,7 @@ class CaptureService:
             return
 
         poll_seconds = max(.25, min(float(self._config.get("db_poll_seconds", .75)), 5.0))
+        head_retries = {}
         while self._wanted.is_set() and not self._stop.is_set() and not self._restart.is_set():
             self._drain_requests()
             if self._once.is_set():
@@ -501,16 +503,23 @@ class CaptureService:
                     title = labels[talker]
                     latest = source.messages(talker, limit=min(200, max(20, int(self._config.get("context_limit", 50)))))
                     latest = sorted(latest, key=lambda row: self._db_cursor(row) or (0, 0, 0))
-                    # Commit the watermark only after the bounded message read
-                    # succeeds; a transient read failure must be retried.
-                    baseline[talker] = marker
                     baseline_local_id = previous[2]
                     # Find the previous committed head in the bounded page.
                     # If it vanished (many rapid messages, shard rollover, or
-                    # stale metadata), show context but do not declare liveness.
+                    # stale metadata), fall back to rows newer than its timestamp.
                     prior_index = next((index for index, row in enumerate(latest)
                                         if self._db_cursor(row) and self._db_cursor(row)[2] == baseline_local_id
                                         and int(row.get("timestamp") or 0) == previous[1]), None)
+                    # 会话头已更新但消息行尚未在 WAL 中可见：不提交水位，下一轮重读。
+                    # 撤回等情况可能永远没有新行，最多重读 8 轮。
+                    if prior_index is not None and prior_index == len(latest) - 1:
+                        head_retries[talker] = head_retries.get(talker, 0) + 1
+                        if head_retries[talker] < 8:
+                            continue
+                    head_retries.pop(talker, None)
+                    # Commit the watermark only after the bounded message read
+                    # succeeds; a transient read failure must be retried.
+                    baseline[talker] = marker
                     if talker not in loaded_contexts:
                         context = latest[:prior_index + 1] if prior_index is not None else latest
                         self._emit_db_messages(source, talker, title, context, historical=True)
@@ -518,6 +527,9 @@ class CaptureService:
                     for index, row in enumerate(latest):
                         cursor = self._db_cursor(row)
                         if not cursor or (prior_index is not None and index <= prior_index):
+                            continue
+                        # 找不到旧水位时，只把晚于旧会话头时间的行当作新消息。
+                        if prior_index is None and int(row.get("timestamp") or 0) <= previous[1]:
                             continue
                         msg = dict(row)
                         msg_id = str(msg.get("id") or "")
@@ -530,8 +542,8 @@ class CaptureService:
                             age_stamp = stamp / 1000 if stamp > 10_000_000_000 else stamp
                         except (TypeError, ValueError, OverflowError):
                             age_stamp = 0
-                        eligible = (prior_index is not None and msg.get("side") == "other" and msg.get("kind") == "text"
-                                    and 0 <= time.time() - age_stamp <= 300)
+                        eligible = (msg.get("side") == "other" and msg.get("kind") == "text"
+                                    and -60 <= time.time() - age_stamp <= 300)
                         self._emit_db_messages(source, talker, title, [msg], historical=not eligible)
                     self._status("live", "正在只读监听微信本地数据库", "wechat_db")
             except Exception:
@@ -784,6 +796,8 @@ class CaptureService:
     @contextmanager
     def _temporary_db_send_window(self):
         """Reveal a tray-hidden/minimized WeChat only for recipient verification."""
+        from ctypes import wintypes
+        from app.fill import focus_window
         from app.winapi import libraries, process_name, window_title
 
         user32, _, _ = libraries()
@@ -793,16 +807,22 @@ class CaptureService:
         def visit(hwnd, _):
             if (process_name(hwnd) in ("weixin.exe", "wechat.exe")
                     and window_title(hwnd) in ("微信", "WeChat", "Weixin")):
-                candidates.append(hwnd)
+                # 微信 4.x 同进程还有约 176x199 的隐藏 "Weixin" 工具窗，按尺寸排除。
+                rect = wintypes.RECT()
+                user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                if rect.right - rect.left >= 400 and rect.bottom - rect.top >= 300:
+                    candidates.append(hwnd)
             return True
 
         user32.EnumWindows(visit, 0)
         if len(candidates) != 1:
             raise RuntimeError("无法唯一定位微信主窗口，已拒绝发送")
         hwnd = candidates[0]
+        previous_foreground = user32.GetForegroundWindow()
         was_visible, was_minimized = bool(user32.IsWindowVisible(hwnd)), bool(user32.IsIconic(hwnd))
         if not was_visible or was_minimized:
-            user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
+            user32.ShowWindow(hwnd, 9 if was_minimized else 4)  # SW_RESTORE / SW_SHOWNOACTIVATE
+            time.sleep(.3)
         try:
             if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
                 raise RuntimeError("无法恢复微信目标窗口，已拒绝发送")
@@ -812,6 +832,12 @@ class CaptureService:
                 user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
             elif not was_visible:
                 user32.ShowWindow(hwnd, 0)  # SW_HIDE
+            # 发送完把焦点还给用户原来的窗口，尽量不打断当前工作。
+            if previous_foreground and previous_foreground != hwnd and user32.IsWindow(previous_foreground):
+                try:
+                    focus_window(previous_foreground)
+                except Exception:
+                    pass
 
     def _send_db_worker(self, task):
         with self._temporary_db_send_window() as expected_hwnd:
@@ -930,17 +956,27 @@ class CaptureService:
                     pass
 
         try:
-            area = verify()
+            try:
+                area = verify()
+            except RuntimeError as exc:
+                if "标题" not in str(exc):
+                    raise
+                # 当前不在目标会话：用搜索切过去，再由 OCR 标题严格核验，错一个字都拒发。
+                from app.fill import open_chat_by_search
+                open_chat_by_search(hwnd, title)
+                area = verify()
             result = send_verified(hwnd, area, task["text"], verify=verify,
                                    inspect_composer=inspect_composer,
                                    expected_window_title=native,
                                    press_send=press_if_still_armed)
             # Delivery evidence comes from the same DB session, never OCR chat.
-            deadline = time.monotonic() + 7
+            # 微信落库可能延迟数秒；最多等 20 秒，并忽略空白差异。
+            deadline = time.monotonic() + 20
+            expected = re.sub(r"\s+", "", task["text"])
             while time.monotonic() < deadline:
-                latest = source.messages(sid, limit=1)
-                if (latest and latest[0].get("side") == "me"
-                        and str(latest[0].get("text") or "").strip() == task["text"]):
+                latest = source.messages(sid, limit=3)
+                if any(row.get("side") == "me" and re.sub(r"\s+", "", str(row.get("text") or "")) == expected
+                       for row in latest):
                     result = {"success": True, "status": "sent",
                               "message": "已从目标会话数据库确认发出的消息"}
                     break

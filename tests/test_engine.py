@@ -75,9 +75,29 @@ class EndpointTests(unittest.TestCase):
                 self.assertEqual(resolve_decision(dict(CONFIG, base_url=source)).url, expected)
 
     def test_chat_url_is_never_misrepresented_as_jev(self):
-        for base in ("https://proxy.example/v1/chat/completions", "https://proxy.example/v1/responses"):
-            with self.assertRaises(ProviderError):
-                resolve_decision(dict(CONFIG, base_url=base))
+        with self.assertRaises(ProviderError):
+            resolve_decision(dict(CONFIG, base_url="https://proxy.example/v1/responses"))
+        route = resolve_decision(dict(CONFIG, base_url="https://proxy.example/v1/chat/completions"))
+        self.assertEqual(route.mode, "chat_json")
+
+    def test_plain_chat_model_uses_json_adapter_for_judgments(self):
+        from unittest.mock import patch as _patch
+        from core.client import post_json
+        config = dict(CONFIG, base_url="https://api.deepseek.example/v1", model_name="deepseek-chat")
+        route = resolve_decision(config)
+        self.assertEqual((route.url, route.mode), ("https://api.deepseek.example/v1/chat/completions", "chat_json"))
+        reply = resolve_reply(config, route)
+        self.assertEqual((reply.url, reply.model, reply.mode), (route.url, "deepseek-chat", "chat"))
+        content = ('<think>x</think>```json\n{"answers": {"reply_now": {"choice": "reply", "confidence": "0.9"}, '
+                   '"danger_level": {"score": 2.0}}}\n```')
+        with _patch("core.client.urllib.request.OpenerDirector.open") as opener:
+            import io, json as _json
+            opener.return_value.__enter__.return_value = io.BytesIO(_json.dumps({"choices": [{"message": {"content": content}}]}).encode())
+            result = post_json(route, {"model": route.model, "state": {}, "questions": {
+                "reply_now": {"type": "choice", "criteria": {"reply": "", "skip": ""}},
+                "danger_level": {"type": "score", "criteria": ["a", "b", "c"]}}})
+        self.assertEqual(result["answers"]["reply_now"]["confidence"], 0.9)
+        self.assertEqual(result["answers"]["danger_level"]["score"], 2)
 
     def test_openrouter_compatible_gateway_base(self):
         config = dict(CONFIG, base_url="https://proxy.example/team/api/v1", reply_model="writer")

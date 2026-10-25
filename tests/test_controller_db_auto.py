@@ -21,9 +21,11 @@ class ControllerDBAutoTests(unittest.TestCase):
             ctrl = Controller(Path(temp))
             try:
                 ctrl.auto_policy['enabled'] = True
-                ctrl._on_auto_sent('synthetic-session', {'epoch': ctrl.auto_epoch},
-                                   '数据库发送核验：微信窗口画面没有及时更新，本次未发送。')
-                self.assertTrue(ctrl.auto_paused)
+                for attempt in range(3):
+                    ctrl._on_auto_sent('synthetic-session', {'epoch': ctrl.auto_epoch},
+                                       '数据库发送核验：微信窗口画面没有及时更新，本次未发送。')
+                    # 前两次只记录并继续监听，第三次连续失败才暂停。
+                    self.assertEqual(ctrl.auto_paused, attempt == 2)
                 self.assertIn('画面没有及时更新', ctrl.auto_detail)
                 self.assertEqual(ctrl.auto_recent[-1]['status'], 'failed')
             finally:

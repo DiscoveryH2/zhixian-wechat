@@ -114,7 +114,7 @@ def prefilter_backlog(messages, *, chat_type="private", own_display_name="",
     # after it, then only send the final 30 messages to Jev.
     items = [m for m in messages[-200:] if isinstance(m, dict)]
     self_indices = [i for i, m in enumerate(items) if _side(m) == "me"]
-    if not self_indices and (require_prior_self or not _group(chat_type)):
+    if not self_indices and require_prior_self:
         return denied("no_prior_self_message")
     last_self = self_indices[-1] if self_indices else -1
     inbound = [(i, m) for i, m in enumerate(items[last_self + 1:], last_self + 1)

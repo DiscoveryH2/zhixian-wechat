@@ -7,7 +7,7 @@ def capabilities(platform=None):
     platform = platform or sys.platform
     windows = platform == 'win32'
     return {'platform': platform, 'name': 'macOS' if platform == 'darwin' else 'Windows' if windows else 'Linux',
-            'native_capture': windows, 'native_database': windows, 'send': windows,
+            'native_capture': windows, 'native_database': windows or platform == 'darwin', 'send': windows,
             'imports': True, 'media': True, 'moments': True,
             'credentials': 'Keychain' if platform == 'darwin' else 'DPAPI' if windows else 'session'}
 

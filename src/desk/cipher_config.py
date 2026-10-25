@@ -11,6 +11,7 @@ import os
 import re
 import sqlite3
 import stat
+import sys
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +45,9 @@ _MAX_VALUE_BYTES = 8 * 1024 * 1024
 def _config_path(environ: Mapping[str, str], explicit: str | os.PathLike[str] | None) -> Path:
     if explicit is not None:
         path = Path(explicit).expanduser()
+    elif sys.platform == "darwin" and not environ.get("APPDATA"):
+        # Electron userData：~/Library/Application Support/<app>（APFS 默认大小写不敏感）
+        path = Path.home() / "Library" / "Application Support" / "ciphertalk" / "ciphertalk-config.db"
     else:
         appdata = environ.get("APPDATA")
         if not appdata:
