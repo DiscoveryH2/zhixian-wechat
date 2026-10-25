@@ -192,3 +192,15 @@ class WechatDBCaptureTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SendTargetTitleTests(unittest.TestCase):
+    """真机发现：OCR 会漏识别生僻字（"陈铄果" → "陈果"）。"""
+
+    def test_ocr_dropped_character_matches_only_when_target_is_unique_best(self):
+        from desk.capture_service import title_matches
+        self.assertTrue(title_matches("陈果", "陈铄果", ["陈铄果", "合成联系人"]))
+        # 另有会话恰好叫"陈果"时，目标不再是唯一最佳匹配，必须拒发。
+        self.assertFalse(title_matches("陈果", "陈铄果", ["陈铄果", "陈果"]))
+        self.assertFalse(title_matches("合成联系人", "陈铄果", ["陈铄果", "合成联系人"]))
+        self.assertTrue(title_matches("合成群(12)", "合成群", ["合成群"]))

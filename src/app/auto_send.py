@@ -116,7 +116,30 @@ def send_verified(hwnd, area, text, *, verify, inspect_composer,
     fill_service.fill(hwnd, area, message, verify=verify,
                       expected_window_title=expected_window_title)
     fill_completed = time.monotonic()
+    try:
+        return _confirm_and_press(hwnd, message, expected_window_title, verify,
+                                  inspect_composer, fill_completed, press_send)
+    except Exception:
+        # 已粘贴但未发出：输入框粘贴前已核验为空，清掉的只会是知弦自己的草稿，
+        # 避免残留在微信里、并阻塞下一次"输入框已有草稿"核验。
+        _clear_composer(hwnd)
+        raise
 
+
+def _clear_composer(hwnd):
+    u, _, _ = libraries()
+    if u.GetForegroundWindow() != hwnd:
+        return
+    u.keybd_event(0x11, 0, 0, 0)
+    u.keybd_event(0x41, 0, 0, 0)
+    u.keybd_event(0x41, 0, 2, 0)
+    u.keybd_event(0x11, 0, 2, 0)
+    u.keybd_event(0x2E, 0, 0, 0)  # Delete
+    u.keybd_event(0x2E, 0, 2, 0)
+
+
+def _confirm_and_press(hwnd, message, expected_window_title, verify, inspect_composer,
+                       fill_completed, press_send):
     _assert_target(hwnd, expected_window_title)
     verify()
     after_fill = _observation(inspect_composer, newer_than=fill_completed,

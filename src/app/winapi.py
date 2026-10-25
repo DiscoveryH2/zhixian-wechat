@@ -10,6 +10,12 @@ def libraries():
     if os.name != "nt":
         raise RuntimeError("微信窗口采集仅支持 Windows")
     u = ctypes.WinDLL("user32", use_last_error=True)
+    # 截图坐标是物理像素；进程必须按显示器 DPI 感知，否则缩放屏上鼠标点击会偏到窗口外。
+    # Qt 6 已设置时此调用失败无副作用；非 Qt 入口（脚本、测试）靠这里兜底。
+    try:
+        u.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))  # PER_MONITOR_AWARE_V2
+    except (AttributeError, OSError):
+        pass
     k = ctypes.WinDLL("kernel32", use_last_error=True)
     d = ctypes.WinDLL("dwmapi", use_last_error=True)
     signatures = {

@@ -48,6 +48,13 @@ def focus_window(hwnd):
             if attached:
                 u.AttachThreadInput(own, thread_id, False)
         time.sleep(.15)
+        if u.GetForegroundWindow() != hwnd:
+            # 后台进程受前台锁限制：模拟一次 Alt 按键可获得切换前台的许可。
+            u.keybd_event(0x12, 0, 0, 0)
+            u.keybd_event(0x12, 0, 2, 0)
+            u.BringWindowToTop(hwnd)
+            u.SetForegroundWindow(hwnd)
+            time.sleep(.2)
     return u.GetForegroundWindow() == hwnd
 
 

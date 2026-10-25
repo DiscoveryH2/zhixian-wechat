@@ -25,6 +25,52 @@ def session_id(title, source="ocr"):
     return source + ":" + stable_id(str(title).strip())
 
 
+def composer_region(full, area, hwnd):
+    """输入框文字区：分隔线下方到底部工具栏上方，按窗口 DPI 缩放。
+
+    微信 4.x 输入区文字在上、工具栏（表情/文件/发送）在下；原先按 100% 写死的
+    y1+30 在 125% 缩放时会裁掉第一行文字，导致核验必然失败。
+    """
+    try:
+        scale = max(1.0, ctypes.windll.user32.GetDpiForWindow(ctypes.c_void_p(hwnd)) / 96)
+    except (AttributeError, OSError):
+        scale = 1.0
+    x0, _, x1, y1 = area[:4]
+    return full[y1 + round(6 * scale):full.shape[0] - round(62 * scale), x0 + round(10 * scale):x1 - 72]
+
+
+class _WindowPlacement(ctypes.Structure):
+    """Win32 WINDOWPLACEMENT；normal 为窗口还原后的矩形。"""
+    class _Rect(ctypes.Structure):
+        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                    ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+    _fields_ = [("length", ctypes.c_uint), ("flags", ctypes.c_uint), ("show_cmd", ctypes.c_uint),
+                ("min_pos", ctypes.c_long * 2), ("max_pos", ctypes.c_long * 2),
+                ("normal", _Rect)]
+
+
+def title_matches(observed, target, all_names, threshold=0.75):
+    """OCR 标题核验：容忍生僻字漏识别，但目标必须是全部会话名中唯一的最佳匹配。
+
+    例："陈铄果" 常被识别为 "陈果"（相似度 0.8）；若另有会话恰好叫 "陈果"，
+    它会以 1.0 胜出，目标不再唯一最佳，拒绝发送。
+    """
+    from difflib import SequenceMatcher
+    from desk.store import normalize_title
+    seen, want = normalize_title(observed), normalize_title(target)
+    if not seen or not want:
+        return False
+    if seen == want:
+        return True
+    score = lambda name: SequenceMatcher(None, seen, normalize_title(name)).ratio()
+    best = score(target)
+    if best < threshold:
+        return False
+    rivals = [score(name) for name in all_names if normalize_title(name) != want]
+    return all(value < best for value in rivals)
+
+
 def check_fill_target(expected, observed, frame_age, same_window=True):
     if not expected or not observed:
         raise RuntimeError("无法可靠识别当前会话标题，已拒绝填入")
@@ -742,7 +788,7 @@ class CaptureService:
             h = full.shape[0]
             if h - y1 < 85 or x1 - x0 < 200:
                 raise RuntimeError('微信输入区过小，已取消发送')
-            composer = full[y1 + 30:h - 42, x0 + 24:x1 - 72]
+            composer = composer_region(full, area, hwnd)
             if composer.size == 0:
                 raise RuntimeError('无法定位微信输入框，已取消发送')
             rows, _ = _engine()(composer, use_cls=False)
@@ -808,8 +854,14 @@ class CaptureService:
             if (process_name(hwnd) in ("weixin.exe", "wechat.exe")
                     and window_title(hwnd) in ("微信", "WeChat", "Weixin")):
                 # 微信 4.x 同进程还有约 176x199 的隐藏 "Weixin" 工具窗，按尺寸排除。
+                # 最小化（含"最小化后收进托盘"）时当前矩形只有约 160x27，改用正常位置尺寸。
                 rect = wintypes.RECT()
-                user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                placement = _WindowPlacement(length=ctypes.sizeof(_WindowPlacement))
+                if (user32.IsIconic(hwnd) and hasattr(user32, "GetWindowPlacement")
+                        and user32.GetWindowPlacement(ctypes.c_void_p(hwnd), ctypes.byref(placement))):
+                    rect = placement.normal
+                else:
+                    user32.GetWindowRect(hwnd, ctypes.byref(rect))
                 if rect.right - rect.left >= 400 and rect.bottom - rect.top >= 300:
                     candidates.append(hwnd)
             return True
@@ -828,10 +880,11 @@ class CaptureService:
                 raise RuntimeError("无法恢复微信目标窗口，已拒绝发送")
             yield hwnd
         finally:
-            if was_minimized:
-                user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
-            elif not was_visible:
+            # "最小化后收进托盘"同时满足两者，必须优先恢复为隐藏。
+            if not was_visible:
                 user32.ShowWindow(hwnd, 0)  # SW_HIDE
+            elif was_minimized:
+                user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
             # 发送完把焦点还给用户原来的窗口，尽量不打断当前工作。
             if previous_foreground and previous_foreground != hwnd and user32.IsWindow(previous_foreground):
                 try:
@@ -912,7 +965,7 @@ class CaptureService:
                 raise RuntimeError("无法定位微信会话标题与输入框")
             x0, y0, x1, y1, _, pane = area
             observed = read_title(full[pane:y0, x0:x1])
-            if not observed or normalize_title(observed) != normalize_title(title):
+            if not observed or not title_matches(observed, title, [name for _, name in labels]):
                 raise RuntimeError("微信当前会话标题与数据库目标不一致")
             if self._hwnd != hwnd or window_title(hwnd) != native:
                 raise RuntimeError("微信目标窗口或标题画面已变化")
@@ -928,7 +981,7 @@ class CaptureService:
             height = full.shape[0]
             if height - y1 < 85 or x1 - x0 < 200:
                 raise RuntimeError("微信输入区域过小")
-            composer = full[y1 + 30:height - 42, x0 + 24:x1 - 72]
+            composer = composer_region(full, area, hwnd)
             if not composer.size:
                 raise RuntimeError("无法定位微信输入框")
             rows, _ = _engine()(composer, use_cls=False)

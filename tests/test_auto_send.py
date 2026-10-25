@@ -14,6 +14,8 @@ class _FakeUser32:
     def IsWindowVisible(self, hwnd): return True
     def IsIconic(self, hwnd): return False
     def GetForegroundWindow(self): return self.foreground
+    def __init__(self): self.keys = []
+    def keybd_event(self, key, scan, flags, extra): self.keys.append((key, flags))
 
 
 class _FakeClock:
@@ -92,6 +94,9 @@ class SendVerifiedTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "不一致"):
             self.call(self.make_frames(post_text="你好呀"))
         self.assertEqual(self.presses, [])
+        # 已粘贴未发出：清掉知弦自己粘贴的草稿（Ctrl+A 后 Delete）
+        self.assertIn((0x41, 0), self.user32.keys)
+        self.assertEqual(self.user32.keys[-2:], [(0x2E, 0), (0x2E, 2)])
 
     def test_stale_observation_never_sends(self):
         with self.assertRaisesRegex(RuntimeError, "过期"):
