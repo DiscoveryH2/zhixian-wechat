@@ -161,6 +161,12 @@ class CaptureService:
         self._db_seen = set()
         self._db_seen_order = deque()
 
+    @property
+    def supports_send(self):
+        """本机能否自动发送微信消息（目前仅 Windows）。"""
+        from desk.platforms import capabilities
+        return capabilities()['send']
+
     def _send_audit(self, stage, task, status=""):
         """Record sender provenance without retaining titles, drafts or keys."""
         if self.audit_path is None:

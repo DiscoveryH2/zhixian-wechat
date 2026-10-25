@@ -204,3 +204,15 @@ class SendTargetTitleTests(unittest.TestCase):
         self.assertFalse(title_matches("陈果", "陈铄果", ["陈铄果", "陈果"]))
         self.assertFalse(title_matches("合成联系人", "陈铄果", ["陈铄果", "合成联系人"]))
         self.assertTrue(title_matches("合成群(12)", "合成群", ["合成群"]))
+
+
+class SendCapabilityTests(unittest.TestCase):
+    def test_real_capture_service_reports_send_capability_by_platform(self):
+        # 后端以真实采集服务的能力为准：macOS 必须拒绝自动发送，Windows 允许。
+        import desk.platforms as platforms
+        real = platforms.capabilities
+        service = CaptureService(lambda *_: None)
+        with patch.object(platforms, "capabilities", lambda platform=None: real("darwin")):
+            self.assertFalse(service.supports_send)
+        with patch.object(platforms, "capabilities", lambda platform=None: real("win32")):
+            self.assertTrue(service.supports_send)

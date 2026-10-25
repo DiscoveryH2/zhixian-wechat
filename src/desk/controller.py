@@ -350,8 +350,8 @@ class Controller(QObject):
             raise ValueError('自动回复去重或限额状态损坏；请重新保存名单并重启应用后再启用。')
         if params.get('acknowledge_send') is not True:
             raise ValueError('请确认：自动回复会真正发送给所选微信联系人或群聊。')
-        if not capabilities()['send']:
-            # 平台限制必须在后端兜底，不能只靠前端隐藏入口。
+        if not getattr(self.capture, 'supports_send', True):
+            # 平台限制必须在后端兜底，不能只靠前端隐藏入口；能力由真实采集服务按平台给出。
             raise ValueError('当前平台暂不支持自动发送微信消息；可使用实时读取、分析与候选回复。')
         if not self.auto_allowlist:
             raise ValueError('请先选择允许自动回复的实时会话。')
