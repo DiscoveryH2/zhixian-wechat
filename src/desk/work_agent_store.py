@@ -148,7 +148,8 @@ class WorkAgentStore:
 
     @staticmethod
     def _safe_name(path: str) -> str:
-        name = Path(path).name.replace("\\", "_").replace("/", "_")
+        # 同时按 / 和 \ 取最后一段：macOS 上 Path 不把反斜杠当分隔符，"..\\..\\x" 会残留 ".."。
+        name = re.split(r"[\\/]", str(path))[-1]
         name = re.sub(r"[\x00-\x1f<>:\"|?*]", "_", name).strip(" .")
         return (name or "attachment")[:180]
 
