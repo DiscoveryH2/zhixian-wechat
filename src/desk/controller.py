@@ -2207,6 +2207,15 @@ class Controller(QObject):
             cfg['style'] = (str(cfg.get('style') or '')[:2000] +
                             '\n自动回复请用不超过130字的自然短句，只回答当前消息；不编造事实、承诺或私聊之外的背景。'
                             '无需添加来源标识，应用会在发送前附加固定的知弦生成说明。')
+            if self.auto_running_trigger.get('type') == 'group':
+                # 群聊是公开场合：禁止替用户编造第一人称经历，并点名回应提问者。
+                asker = (self.auto_running_trigger['message'].get('sender_name')
+                         or self.auto_running_trigger['message'].get('sender') or '')
+                cfg['style'] += ('\n这是群聊，回复会公开显示。只依据群里已经出现的信息作答，'
+                                 '不得以第一人称陈述个人经历、使用情况（包括“我试过/没试过/我用过”）、状态、行程或承诺；'
+                                 '缺少依据时坦率说不确定，或建议查看文档、请其他群友补充。'
+                                 + (f'开头用“{asker[:20]}”称呼提问者，' if asker and not asker.startswith('wxid_') else '')
+                                 + '不要使用 @ 符号。')
         if contact and contact.get('relationship'):
             cfg['relationship'] = contact['relationship']
         self.job_serial += 1
@@ -2255,9 +2264,14 @@ class Controller(QObject):
                 self.status.update(analysis='error', last_error=error)
                 self.toast.emit(error, 'error')
                 if auto_trigger:
-                    self.auto_paused = True
-                    self.auto_detail = '模型分析失败，自动回复已暂停。'
-                    self._auto_record(ident, 'failed', '模型分析失败')
+                    # 模型超时/限流多为瞬时问题：计入连续失败，3 次才暂停。
+                    self.auto_failures += 1
+                    self._auto_record(ident, 'failed', '模型分析失败：' + str(error)[:80])
+                    if self.auto_failures >= 3:
+                        self.auto_paused = True
+                        self.auto_detail = '模型分析已连续 3 次失败，自动回复已暂停。'
+                    else:
+                        self.auto_detail = f'模型分析失败（连续 {self.auto_failures}/3），继续监听。
             elif self.fingerprint(self.sessions[ident]) == fingerprint:
                 self.status.update(analysis='idle', last_error='')
                 if auto_trigger:

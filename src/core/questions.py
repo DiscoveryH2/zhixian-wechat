@@ -219,7 +219,7 @@ def normalize_messages(messages: list, keep: int = 30) -> list[dict]:
     for item in list(messages or [])[-max(1, min(200, keep)):]:
         if isinstance(item, dict):
             who = item.get("side", item.get("from"))
-            text, name = item.get("text"), item.get("sender", item.get("name"))
+            text, name = item.get("text"), item.get("sender_name") or item.get("sender", item.get("name"))
         else:
             who, text = item[0], item[1]
             name = item[2] if len(item) > 2 else None

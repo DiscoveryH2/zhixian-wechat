@@ -608,7 +608,15 @@ class WeChatDBSource:
             except Exception as exc:
                 raise WeChatDBError("读取微信消息快照失败") from exc
         rows.sort(key=lambda pair: pair[0], reverse=True)
-        return [row for _, row in rows[:limit]]
+        result = [row for _, row in rows[:limit]]
+        if session_id.endswith("@chatroom"):
+            # 给模型和界面看群昵称/备注；sender 保持 wxid，供身份关联与去重使用。
+            names = self._contact_map(sorted({row["sender"] for row in result if row.get("sender")}))
+            for row in result:
+                name = names.get(row.get("sender") or "", {}).get("name")
+                if name and name != row["sender"]:
+                    row["sender_name"] = name
+        return result
 
 
 def _safe_int(value: Any) -> int:

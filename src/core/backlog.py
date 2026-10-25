@@ -156,7 +156,7 @@ def prefilter_backlog(messages, *, chat_type="private", own_display_name="",
         if side not in ("me", "other") or not isinstance(body, str) or not body.strip():
             continue
         row = {"from": side, "text": body.strip()[:MAX_TEXT]}
-        sender = item.get("sender", item.get("name"))
+        sender = item.get("sender_name") or item.get("sender", item.get("name"))
         if isinstance(sender, str) and sender.strip():
             row["name"] = sender.strip()[:80]
         context.append(row)

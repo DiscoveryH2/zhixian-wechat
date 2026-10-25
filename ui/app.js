@@ -203,7 +203,7 @@
       for (const [idx, message] of current.messages.entries()) {
         const m = el('article', `message ${message.side === 'me' ? 'me' : 'other'}${idx === current.messages.length - 1 ? ' message-latest' : ''}`);
         m.dataset.messageId = message.id; if (message.id === current.highlight_message_id) m.classList.add('message-hit');
-        append(m, append(el('div', 'message-meta'), el('span', 'sender', message.side === 'me' ? '我' : message.sender || current.title), el('time', '', formatTime(message.timestamp))), experience.messageContent(message, current));
+        append(m, append(el('div', 'message-meta'), el('span', 'sender', message.side === 'me' ? '我' : message.sender_name || message.sender || current.title), el('time', '', formatTime(message.timestamp))), experience.messageContent(message, current));
         timeline.append(m);
       }
     } else timeline.append(empty(live() ? '正在寻找你的对话' : '从一段对话开始', live() ? '请保持微信聊天窗口可见。知弦会在这里整理识别到的消息。' : '从全局会话导入并选择完整聊天记录，或连接当前平台可用的数据源。', 'chat', !live() ? button('选择会话', 'people', () => experience.openCatalog(), 'primary small', !available()) : null));
